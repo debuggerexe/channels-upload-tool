@@ -303,8 +303,6 @@ nano config.json
 
 完整配置字段见 `config.example.json`
 
-**注意：** `config.json` 包含个人配置，已添加到 `.gitignore`，不会上传到 GitHub。
-
 ---
 
 ## 手动上传（调试用）
