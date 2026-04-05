@@ -13,14 +13,18 @@ from pathlib import Path
 @dataclass
 class VideoInfo:
     """视频信息数据结构"""
-    title: str                    # 视频标题（对应 Notion Cover 字段）
-    short_title: str              # 短标题（对应 Notion Title 字段，可选）
-    description: str              # 视频描述（不含标签）
+    title: str                    # 视频标题（对应 Notion 标题字段）
+    short_title: str              # 短标题（对应 Notion 短标题字段，16字以内）
+    description: str                # 视频描述（不含标签）
     tags: str                     # 话题标签行
     video_path: str               # 本地视频文件路径
     cover_path: Optional[str]     # 本地封面图路径
     publish_date: datetime        # 发布日期
     collections: List[str]        # 合集名称列表（支持多选）
+    original_declaration: bool = True  # 声明原创
+    cover_position: str = "middle"    # 封面调整位置 (top/middle/bottom)
+    name_for_match: str = ""      # 用于匹配本地视频的Name字段（如 我的视频名称）
+    folder_name: str = ""         # 文件夹名称（用于日志显示）
 
 
 class VideoDataSource(ABC):

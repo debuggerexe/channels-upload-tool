@@ -1,0 +1,13 @@
+{
+    "publish_date": "2026-01-01",
+    "publish_times": ["09:00"],
+    "timezone": "Asia/Shanghai",
+    "video_dir": "videos",
+    "text_dir": "texts",
+    "original_declaration": true,
+    "cover_position": "middle",
+    "collection": "",
+    "notion_api_token": "",
+    "notion_database_id": "",
+    "notion_database_name": ""
+}

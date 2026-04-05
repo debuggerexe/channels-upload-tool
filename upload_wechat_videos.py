@@ -1,7 +1,9 @@
 import os
+import sys
 import re
 import asyncio
 import json
+import argparse
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
@@ -38,20 +40,41 @@ class WeChatVideoUploader:
         # 数据源
         self.data_source = data_source
         
+        # 默认发布日期（从未能提取日期的文件夹使用）
+        publish_date_str = self.config.get('publish_date', '')
+        if publish_date_str:
+            try:
+                self.config_publish_date = datetime.strptime(publish_date_str, '%Y-%m-%d')
+            except ValueError:
+                self.config_publish_date = datetime.now()
+        else:
+            self.config_publish_date = datetime.now()
+        
     def _load_config(self) -> dict:
         """加载配置，优先读取 config.json，不存在则读取 config.example.json"""
         # 优先读取本地配置
         config_path = Path(BASE_DIR) / "config.json"
         if config_path.exists():
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"⚠️ 配置文件格式错误: {e}")
+                return {}
+            except Exception as e:
+                print(f"⚠️ 读取配置文件失败: {e}")
+                return {}
         
         # 本地配置不存在，读取示例配置
         example_path = Path(BASE_DIR) / "config.example.json"
         if example_path.exists():
-            print("⚠️ 未找到 config.json，使用默认配置（config.example.json）")
-            with open(example_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                print("⚠️ 未找到 config.json，使用默认配置（config.example.json）")
+                with open(example_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"⚠️ 读取示例配置失败: {e}")
+                return {}
         
         return {}
         
@@ -116,6 +139,10 @@ class WeChatVideoUploader:
     
     def get_sorted_video_folders(self) -> List[Tuple[datetime, Path, bool]]:
         """获取按日期排序的视频文件夹，无日期的使用config中的默认日期"""
+        if not self.videos_dir.exists():
+            print(f"⚠️ 视频文件夹不存在: {self.videos_dir}")
+            return []
+        
         dated_folders = []
         for folder in self.videos_dir.iterdir():
             if not folder.is_dir():
@@ -254,14 +281,14 @@ class WeChatVideoUploader:
         except Exception as move_error:
             print(f"❌ 移动失败: {move_error}")
     
-    async def upload_all_videos(self, publish_mode: str = '1', skip_confirm: bool = False):
+    async def upload_all_videos(self, publish_mode: str = '1', skip_confirm: bool = False) -> bool:
         """上传所有视频（本地模式）"""
         print("开始扫描视频文件夹...")
         dated_folders = self.get_sorted_video_folders()
         
         if not dated_folders:
             print("未找到有效的视频文件夹！")
-            return
+            return False
             
         print(f"\n找到 {len(dated_folders)} 个视频待上传，按日期排序:")
         for date, folder, has_date in dated_folders:
@@ -272,7 +299,7 @@ class WeChatVideoUploader:
             confirm = input("\n确认开始上传？(y/n): ")
             if confirm.lower() != 'y':
                 print("上传已取消")
-                return
+                return False
         else:
             print(f"\n直接开始上传，共 {len(dated_folders)} 个视频...")
         
@@ -280,7 +307,7 @@ class WeChatVideoUploader:
         print("\n正在登录微信视频号...")
         if not await weixin_setup(self.account_file, handle=True):
             print("登录失败，请检查账号配置")
-            return
+            return False
         
         # 上传每个视频
         success_count = 0
@@ -302,7 +329,7 @@ class WeChatVideoUploader:
                 now = datetime.now()
                 if publish_time < now:
                     publish_time = now + timedelta(minutes=10)
-                    tencent_logger.warning(f"视频日期已调整: {publish_time.strftime('%Y-%m-%d %H:%M')}")
+                    print(f"⚠️ 视频日期已调整: {publish_time.strftime('%Y-%m-%d %H:%M')}")
                 
                 # 组装视频数据
                 video_data = {
@@ -335,18 +362,29 @@ class WeChatVideoUploader:
         print(f"\n{'='*60}")
         print(f"上传完成！成功上传 {success_count}/{len(dated_folders)} 个视频")
         print(f"{'='*60}")
+        return success_count > 0
 
-    async def upload_videos_from_source(self, videos: List[VideoInfo], publish_mode: str = '1'):
+    async def upload_videos_from_source(self, videos: List[VideoInfo], publish_mode: str = '1') -> bool:
         """从数据源上传视频（云端模式）"""
         if not videos:
             print("未找到要上传的视频")
-            return
+            return False
         
         # 登录微信视频号
         print("\n正在登录微信视频号...")
-        if not await weixin_setup(self.account_file, handle=True):
-            print("登录失败，请检查账号配置")
-            return
+        try:
+            if not await weixin_setup(self.account_file, handle=True):
+                print("❌ 登录失败，请检查账号配置")
+                return False
+        except Exception as e:
+            error_msg = str(e)
+            if "TargetClosed" in error_msg or "browser has been closed" in error_msg:
+                print("\n❌ 登录窗口被关闭或扫码超时")
+                print("💡 提示：扫码登录时请勿关闭浏览器窗口")
+                print("   如需重新登录，请删除 cookies 文件夹后重试")
+            else:
+                print(f"\n❌ 登录失败: {e}")
+            return False
         
         # 上传每个视频
         success_count = 0
@@ -382,156 +420,255 @@ class WeChatVideoUploader:
                     await asyncio.sleep(5)
         
         # 上传完成统计
-        print(f"\n{'='*60}")
-        print(f"上传完成！成功上传 {success_count}/{len(videos)} 个视频")
-        print(f"{'='*60}")
+        return success_count > 0
 
 
 async def main():
-    # 账号配置文件路径
+    # 账号配置文件路径（使用绝对路径）
     account_file = str(BASE_DIR / "cookies" / "tencent_uploader" / "account.json")
     
-    # 确保账号文件存在
-    if not os.path.exists(account_file):
-        print(f"错误: 账号文件不存在: {account_file}")
-        print("请先运行 examples/get_tencent_cookie.py 获取cookie")
-        return
-    
-    # ==================== 交互式菜单 ====================
-    print("\n" + "="*60)
-    print("🎬 微信视频号批量上传工具")
-    print("="*60)
-    print("\n请选择数据源：")
-    print("1. 本地模式（从 videos/ 文件夹读取 txt 文件）")
-    print("2. 云端模式（从 Notion 数据库读取视频信息）")
-    print()
-    
-    mode = input("请输入选项 (1/2): ").strip()
-    
-    data_source = None
+    # ==================== 命令行参数解析 ====================
+    parser = argparse.ArgumentParser(description='微信视频号批量上传工具')
+    parser.add_argument('--mode', choices=['local', 'notion'], help='数据源模式: local=本地模式, notion=云端模式')
+    parser.add_argument('--publish', choices=['1', '2'], help='发布方式: 1=定时发布, 2=保存草稿')
+    parser.add_argument('--no-interactive', action='store_true', help='非交互模式（使用默认值或命令行参数）')
+    args = parser.parse_args()
     
     # 加载配置（优先 config.json，不存在则读取 config.example.json）
     def load_config():
         config_path = Path(BASE_DIR) / "config.json"
         if config_path.exists():
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"⚠️ 配置文件格式错误: {e}")
+                print(f"   请检查 {config_path} 是否为有效的 JSON 格式")
+                return {}
+            except Exception as e:
+                print(f"⚠️ 读取配置文件失败: {e}")
+                return {}
         
         example_path = Path(BASE_DIR) / "config.example.json"
         if example_path.exists():
-            return json.load(example_path)
+            try:
+                with open(example_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"⚠️ 读取示例配置失败: {e}")
+                return {}
         
         return {}
     
-    if mode == "1":
-        print("\n✅ 已选择：本地模式")
+    data_source = None
+    mode = None
+    publish_choice = None
+    
+    # 非交互模式：使用命令行参数
+    if args.no_interactive or args.mode:
+        mode = args.mode or 'local'
+        publish_choice = args.publish or '1'
+        
         config = load_config()
-        data_source = LocalDataSource(config)
         
-    elif mode == "2":
-        print("\n✅ 已选择：云端模式（Notion）")
-        print("\n📁 将扫描 videos/ 文件夹中的视频，并从 Notion 获取标题/描述/标签")
-        
-        # 检查 Notion API Token
-        if not os.getenv("NOTION_API_TOKEN"):
-            print("\n⚠️ 请先设置环境变量 NOTION_API_TOKEN")
-            print("示例: export NOTION_API_TOKEN='your_token_here'")
-            
-            choice = input("\n请选择：1. 切换到本地模式  2. 退出程序 : ").strip()
-            if choice == "1":
-                print("\n✅ 已切换至：本地模式")
-                config = load_config()
-                data_source = LocalDataSource(config)
-            else:
-                print("程序已退出")
+        if mode == 'local':
+            print("\n✅ 已选择：本地模式（命令行参数）")
+            data_source = LocalDataSource(config)
+        elif mode == 'notion':
+            print("\n✅ 已选择：云端模式（命令行参数）")
+            # 优先从 config 读取，否则检查环境变量
+            notion_token = config.get('notion_api_token', '').strip()
+            if not notion_token:
+                notion_token = os.getenv('NOTION_API_TOKEN', '')
+            if not notion_token:
+                print("\n❌ 非交互模式下需要设置 NOTION_API_TOKEN（环境变量或 config.json）")
                 return
-        else:
-            # 读取配置
-            config = load_config()
-            
+            # 临时设置环境变量供 NotionDataSource 使用
+            os.environ['NOTION_API_TOKEN'] = notion_token
             try:
                 data_source = NotionDataSource(config)
             except ValueError as e:
-                print(f"\n⚠️ {e}")
+                print(f"\n❌ Notion 初始化失败: {e}")
+                return
+    else:
+        # ==================== 交互式菜单 ====================
+        print("\n" + "="*60)
+        print("🎬 微信视频号批量上传工具")
+        print("="*60)
+        print("\n请选择数据源：")
+        print("1. 本地模式（从 videos/ 文件夹读取 txt 文件）")
+        print("2. 云端模式（从 Notion 数据库读取视频信息）")
+        print()
+        
+        mode_input = input("请输入选项 (1/2): ").strip()
+        
+        # 将 1/2 转换为 local/notion
+        mode = 'local' if mode_input == '1' else 'notion'
+        
+        config = load_config()
+        
+        if mode == 'local':
+            print("\n✅ 已选择：本地模式")
+            data_source = LocalDataSource(config)
+            
+        elif mode == 'notion':
+            print("\n✅ 已选择：云端模式（Notion）")
+            print("\n📁 将扫描 videos/ 文件夹中的视频，并从 Notion 获取标题/描述/标签")
+            
+            # 优先从 config.json 读取 token，其次环境变量
+            notion_token = config.get('notion_api_token', '').strip()
+            if not notion_token:
+                notion_token = os.getenv('NOTION_API_TOKEN', '')
+            
+            if not notion_token:
+                print("\n⚠️ 请先配置 Notion API Token")
+                print("方式1: 在 config.json 中设置 'notion_api_token'")
+                print("方式2: 设置环境变量 NOTION_API_TOKEN")
+                print("示例: export NOTION_API_TOKEN='your_token_here'")
                 
                 choice = input("\n请选择：1. 切换到本地模式  2. 退出程序 : ").strip()
                 if choice == "1":
                     print("\n✅ 已切换至：本地模式")
                     data_source = LocalDataSource(config)
+                    mode = 'local'
                 else:
                     print("程序已退出")
                     return
             else:
-                # 云端模式正常初始化
+                # 设置环境变量供 NotionDataSource 使用
+                os.environ['NOTION_API_TOKEN'] = notion_token
+                # 读取配置
+                try:
+                    data_source = NotionDataSource(config)
+                except ValueError as e:
+                    print(f"\n⚠️ {e}")
+                    
+                    choice = input("\n请选择：1. 切换到本地模式  2. 退出程序 : ").strip()
+                    if choice == "1":
+                        print("\n✅ 已切换至：本地模式")
+                        data_source = LocalDataSource(config)
+                        mode = 'local'
+                    else:
+                        print("程序已退出")
+                        return
+    
+    # ==================== 执行上传 ====================
+    if data_source:
+        # 本地模式
+        if mode == 'local':
+            try:
+                uploader = WeChatVideoUploader(account_file, data_source)
+                
+                print("\n开始扫描视频文件夹...")
+                dated_folders = uploader.get_sorted_video_folders()
+                
+                if not dated_folders:
+                    print("未找到有效的视频文件夹！")
+                    return
+                    
+                print(f"\n找到 {len(dated_folders)} 个视频待上传，按日期排序:")
+                for date, folder, has_date in dated_folders:
+                    print(f"- {date.strftime('%Y-%m-%d')}: {folder.name}")
+                
+                # 交互模式下询问发布方式
+                if not args.no_interactive and not args.publish:
+                    print("\n请选择操作：")
+                    print("1. 定时发布")
+                    print("2. 保存草稿")
+                    print("3. 取消上传")
+                    
+                    choice = input("\n请输入选项 (1/2/3): ").strip()
+                    
+                    if choice == '3':
+                        print("上传已取消")
+                        return
+                    
+                    publish_choice = '1' if choice == '1' else '2'
+                
+                if not publish_choice:
+                    publish_choice = '1'  # 默认定时发布
+                    
+                action_name = "定时发布" if publish_choice == '1' else "保存草稿"
+                print(f"\n✅ 确认使用{action_name}模式，开始上传...")
+                
+                success = await uploader.upload_all_videos(publish_mode=publish_choice, skip_confirm=True)
+                if not success:
+                    print("\n⚠️ 上传未完成，请检查错误信息后重试")
+            except Exception as e:
+                if "TargetClosed" in str(e) or "browser has been closed" in str(e):
+                    print("\n❌ 登录窗口被关闭或扫码超时")
+                    print("💡 提示：扫码登录时请勿关闭浏览器窗口")
+                    print("   如需重新登录，请删除 cookies 文件夹后重试")
+                elif isinstance(e, KeyboardInterrupt):
+                    print("\n⚠️ 用户中断了操作")
+                else:
+                    print(f"发生错误: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+        
+        # 云端模式
+        elif mode == 'notion':
+            try:
                 print("\n正在扫描本地视频并匹配 Notion 数据...")
                 videos = data_source.get_videos()
                 
                 if not videos:
-                    print("❌ 未找到可上传的视频（请确保 videos/ 文件夹中有视频且 Notion 中有匹配的标题）")
+                    print("❌ 未找到匹配的视频！")
+                    print("\n请检查：")
+                    print("1. videos/ 文件夹中是否有视频文件")
+                    print("2. Notion 数据库中的视频名称是否与本地匹配")
                     return
                 
-                print("\n请选择发布方式：")
-                print("1. 定时发布（设置发布时间后发表）")
-                print("2. 保存草稿（不发表，仅保存到草稿箱）")
-                print("3. 退出")
+                print(f"\n找到 {len(videos)} 个匹配的视频")
+                for v in videos:
+                    print(f"  - {v.folder_name}")
                 
-                publish_choice = input("\n请输入选项 (1/2/3): ").strip()
+                # 交互模式下询问发布方式
+                if not args.no_interactive and not args.publish:
+                    print("\n请选择发布方式：")
+                    print("1. 定时发布")
+                    print("2. 保存草稿")
+                    print("3. 取消")
+                    
+                    choice = input("\n请输入选项 (1/2/3): ").strip()
+                    
+                    if choice == '3':
+                        print("上传已取消")
+                        return
+                    elif choice not in ['1', '2']:
+                        print("无效选项，默认使用定时发布")
+                        publish_choice = '1'
+                    else:
+                        publish_choice = choice
                 
-                if publish_choice == '3':
-                    print("上传已取消")
-                    return
-                elif publish_choice not in ['1', '2']:
-                    print("无效选项，默认使用定时发布")
-                    publish_choice = '1'
-                
+                if not publish_choice:
+                    publish_choice = '1'  # 默认定时发布
+                    
                 # 创建上传器并执行云端模式上传
                 uploader = WeChatVideoUploader(account_file, data_source)
-                await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
+                success = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
+                if not success:
+                    print("\n⚠️ 上传未完成，请检查错误信息后重试")
+            except Exception as e:
+                if "TargetClosed" in str(e) or "browser has been closed" in str(e):
+                    print("\n❌ 登录窗口被关闭或扫码超时")
+                    print("💡 提示：扫码登录时请勿关闭浏览器窗口")
+                    print("   如需重新登录，请删除 cookies 文件夹后重试")
+                elif isinstance(e, KeyboardInterrupt):
+                    print("\n⚠️ 用户中断了操作")
+                else:
+                    print(f"\n❌ 云端模式执行失败: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
                 return
-        
-    else:
-        print("❌ 无效选项，默认使用本地模式")
-        config = load_config()
-        data_source = LocalDataSource(config)
-    
-    # 本地模式上传
-    try:
-        # 创建 uploader 对象（本地模式需要在这里创建）
-        uploader = WeChatVideoUploader(account_file, data_source)
-        
-        print("\n开始扫描视频文件夹...")
-        dated_folders = uploader.get_sorted_video_folders()
-        
-        if not dated_folders:
-            print("未找到有效的视频文件夹！")
-            return
-            
-        print(f"\n找到 {len(dated_folders)} 个视频待上传，按日期排序:")
-        for date, folder, has_date in dated_folders:
-            print(f"- {date.strftime('%Y-%m-%d')}: {folder.name}")
-        
-        # 【优化】合并确认和发布方式选择，减少一次交互
-        print("\n请选择操作：")
-        print("1. 定时发布")
-        print("2. 保存草稿")
-        print("3. 取消上传")
-        
-        choice = input("\n请输入选项 (1/2/3): ").strip()
-        
-        if choice == '3':
-            print("上传已取消")
-            return
-        
-        publish_choice = '1' if choice == '1' else '2'
-        action_name = "定时发布" if choice == '1' else "保存草稿"
-        print(f"\n✅ 确认使用{action_name}模式，开始上传...")
-        
-        await uploader.upload_all_videos(publish_mode=publish_choice, skip_confirm=True)
-    except Exception as e:
-        print(f"发生错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\n⚠️ 程序被用户中断")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ 程序异常退出: {e}")
+        sys.exit(1)

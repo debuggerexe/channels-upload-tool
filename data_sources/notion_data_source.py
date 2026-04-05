@@ -50,7 +50,7 @@ class NotionDataSource(VideoDataSource):
     """Notion 云端数据源"""
     
     # 默认数据库 ID（当 config 中未配置时作为回退）
-    DEFAULT_DATABASE_ID = "33792e39-abea-807b-b977-d15188c6827e"
+    DEFAULT_DATABASE_ID = ""
     NOTION_API_BASE = "https://api.notion.com/v1"
     
     def __init__(self, config: Optional[dict] = None):
@@ -102,8 +102,8 @@ class NotionDataSource(VideoDataSource):
         raise ValueError(
             "未配置 Notion 数据库信息。\n"
             "请在 config.json 中配置以下任一字段：\n"
-            "  - notion_database_id: 数据库ID（如 33792e39-abea-807b-b977-d15188c6827e）\n"
-            "  - notion_database_name: 数据库名称（如 Published）\n"
+            "  - notion_database_id: 数据库ID（如 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）\n"
+            "  - notion_database_name: 数据库名称（如 MyDatabase）\n"
             "\n或者切换到本地模式上传。"
         )
     
@@ -115,7 +115,9 @@ class NotionDataSource(VideoDataSource):
             "filter": {"value": "database", "property": "object"},
             "page_size": 10
         }
-        response = requests.post(url, headers=self.headers, json=payload)
+        # 确保 headers 正确编码
+        headers = self.headers.copy()
+        response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         
         results = response.json().get("results", [])
@@ -270,7 +272,16 @@ class NotionDataSource(VideoDataSource):
             multi_select = prop.get("multi_select", [])
             return ", ".join([item.get("name", "") for item in multi_select if item.get("name")])
         
-        return ""
+        elif prop_type == "select":
+            # select 类型
+            select_obj = prop.get("select", {})
+            if select_obj:
+                return select_obj.get("name", "")
+            return ""
+        
+        elif prop_type == "checkbox":
+            # checkbox 类型
+            return prop.get("checkbox", False)
     
     def get_videos(self, date_range: Optional[Tuple[date, date]] = None) -> List[VideoInfo]:
         """
@@ -307,14 +318,35 @@ class NotionDataSource(VideoDataSource):
         # 查询 Notion 数据库
         pages = self._query_database(filter_obj)
         
-        # 建立 Notion 记录索引（以 短标题 字段为 key）
+        print(f"📡 Notion API 返回 {len(pages)} 条原始记录")
+        if pages:
+            first_props = pages[0].get('properties', {})
+            print(f"📄 第一条记录 properties 列表: {list(first_props.keys())}")
+            # 查找 title 类型的属性
+            for prop_name, prop_data in first_props.items():
+                prop_type = prop_data.get('type', 'unknown')
+                if prop_type == 'title':
+                    title_items = prop_data.get('title', [])
+                    title_text = ''.join([item.get('plain_text', '') for item in title_items])
+                    print(f"   ⭐ {prop_name}: type={prop_type} → value='{title_text}'")
+            # 打印所有 Name 提取结果
+            for page in pages[:3]:
+                props = page.get('properties', {})
+                for prop_name, prop_data in props.items():
+                    if prop_data.get('type') == 'title':
+                        title_items = prop_data.get('title', [])
+                        title_text = ''.join([item.get('plain_text', '') for item in title_items])
+                        print(f"   📄 提取的 title: '{title_text}' (字段: {prop_name})")
+        
+        # 建立 Notion 记录索引（以 Name 字段为 key，用于匹配视频文件）
         notion_records = {}
         for page in pages:
-            short_title_for_match = self._extract_property(page, "短标题")
-            if short_title_for_match:
-                notion_records[short_title_for_match.strip()] = page
+            name_for_match = self._extract_property(page, "Name")
+            if name_for_match:
+                notion_records[name_for_match.strip()] = page
         
         print(f"📚 Notion 中共有 {len(notion_records)} 条视频记录")
+        print(f"📋 Notion Name 列表: {list(notion_records.keys())}")
         
         # 扫描本地视频（两种方式）
         videos = []
@@ -337,12 +369,22 @@ class NotionDataSource(VideoDataSource):
                 continue
             
             # 提取 Notion 中的信息（新字段映射）
-            short_title = self._extract_property(notion_page, "短标题")  # 视频号短标题（16字以内），同时用于匹配本地视频
+            # Name: 用于匹配本地视频文件名（Title 字段）
+            # 短标题: 视频号短标题（16字以内）
+            name_for_match = self._extract_property(notion_page, "Name")  # 用于匹配本地视频
+            short_title = self._extract_property(notion_page, "短标题")  # 视频号短标题
             title = self._extract_property(notion_page, "标题")  # 视频号主标题
             description = self._extract_property(notion_page, "描述")  # 视频描述区内容
-            tags = self._extract_property(notion_page, "标签")  # 话题标签（如 #话题1 #话题2）
-            collections_str = self._extract_property(notion_page, "合集")  # 合集名称（支持多选）
+            tags = self._extract_property(notion_page, "标签")  # 话题标签
+            collections_str = self._extract_property(notion_page, "合集")  # 合集名称
             date_str = self._extract_property(notion_page, "发布日期")
+            cover_position = self._extract_property(notion_page, "封面调整") or "middle"  # select类型，默认middle
+            original_declaration = self._extract_property(notion_page, "声明原创")  # checkbox类型
+            
+            # 使用 Name 字段进行匹配验证
+            if not name_for_match:
+                print(f"⚠️ Notion 记录缺少 Name 字段，跳过: '{clean_title}'")
+                continue
             
             # 检查 发布日期 字段是否为空
             if not date_str:
@@ -355,8 +397,8 @@ class NotionDataSource(VideoDataSource):
             if collections_str:
                 collections = [c.strip() for c in collections_str.split(",") if c.strip()]
             
-            # 清理短标题（16字以内），如果没有短标题则用标题
-            final_short_title = sanitize_short_title(short_title if short_title else title)
+            # 清理短标题（16字以内）
+            final_short_title = sanitize_short_title(short_title if short_title else "")
             
             # 如果截断了，打印提示
             original = short_title if short_title else title
@@ -413,7 +455,11 @@ class NotionDataSource(VideoDataSource):
                     publish_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 else:
                     date_part = datetime.fromisoformat(date_str)
+                    # 创建无时区的日期
                     publish_date = date_part.replace(hour=self.default_hour, minute=self.default_minute)
+                # 确保日期是 offset-naive（无时区）
+                if publish_date.tzinfo is not None:
+                    publish_date = publish_date.replace(tzinfo=None)
             except Exception as e:
                 print(f"⚠️ 日期解析失败 '{date_str}': {e}，跳过视频: '{clean_title}'")
                 continue
@@ -426,7 +472,11 @@ class NotionDataSource(VideoDataSource):
                 video_path=str(video_file),
                 cover_path=cover_path,
                 publish_date=publish_date,
-                collections=collections  # 合集名称列表
+                collections=collections,  # 合集名称列表
+                original_declaration=bool(original_declaration) if original_declaration is not None else True,
+                cover_position=cover_position,  # 封面调整位置
+                name_for_match=name_for_match,  # 用于匹配的Name字段
+                folder_name=container_name  # 文件夹名称
             )
             videos.append(video_info)
             print(f"✅ 匹配成功: '{clean_title}' -> 文件 '{container_name}'")
@@ -529,6 +579,115 @@ class NotionDataSource(VideoDataSource):
     def get_videos_count(self, date_range: Optional[Tuple[date, date]] = None) -> int:
         """获取视频数量"""
         return len(self.get_videos(date_range))
+    
+    def get_all_notion_videos(self, date_range: Optional[Tuple[date, date]] = None) -> List[VideoInfo]:
+        """
+        获取所有 Notion 云端视频记录（不依赖本地视频文件）
+        
+        用于视频预览页面的"云端"模式，直接显示所有 Notion 数据库中的视频
+        """
+        print("📡 正在从 Notion 获取所有云端视频...")
+        
+        # 构建查询过滤器（如果有日期范围）
+        filter_obj = None
+        if date_range:
+            start_date, end_date = date_range
+            filter_obj = {
+                "and": [
+                    {"property": "发布日期", "date": {"on_or_after": start_date.isoformat()}},
+                    {"property": "发布日期", "date": {"on_or_before": end_date.isoformat()}}
+                ]
+            }
+        
+        # 查询 Notion 数据库
+        pages = self._query_database(filter_obj)
+        print(f"📡 Notion API 返回 {len(pages)} 条记录")
+        
+        videos = []
+        for page in pages:
+            try:
+                # 提取 Notion 中的信息
+                name_for_match = self._extract_property(page, "Name")  # 用于匹配本地视频
+                short_title = self._extract_property(page, "短标题")  # 视频号短标题
+                title = self._extract_property(page, "标题")  # 视频号主标题
+                description = self._extract_property(page, "描述")  # 视频描述区内容
+                tags = self._extract_property(page, "标签")  # 话题标签
+                collections_str = self._extract_property(page, "合集")  # 合集名称
+                date_str = self._extract_property(page, "发布日期")
+                cover_position = self._extract_property(page, "封面调整") or "middle"
+                original_declaration = self._extract_property(page, "声明原创")
+                
+                # 跳过缺少必要字段的记录
+                if not name_for_match:
+                    print(f"⚠️ 跳过：Notion 记录缺少 Name 字段")
+                    continue
+                
+                if not date_str:
+                    print(f"⚠️ 跳过：'{name_for_match}' 缺少发布日期")
+                    continue
+                
+                # 处理合集名称列表
+                collections = []
+                if collections_str:
+                    collections = [c.strip() for c in collections_str.split(",") if c.strip()]
+                
+                # 清理短标题
+                final_short_title = sanitize_short_title(short_title if short_title else "")
+                
+                # 组装描述
+                description_parts = []
+                if title:
+                    description_parts.append(title)
+                if description:
+                    description_parts.append(description)
+                if tags:
+                    tag_list = [t.strip() for t in tags.replace('，', ',').split(',') if t.strip()]
+                    formatted_tags = ' '.join([f"#{tag}" for tag in tag_list])
+                    description_parts.append(formatted_tags)
+                
+                full_description = '\n'.join(description_parts)
+                
+                # 解析日期
+                try:
+                    if 'T' in date_str:
+                        publish_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    else:
+                        date_part = datetime.fromisoformat(date_str)
+                        publish_date = date_part.replace(hour=self.default_hour, minute=self.default_minute)
+                    if publish_date.tzinfo is not None:
+                        publish_date = publish_date.replace(tzinfo=None)
+                except Exception as e:
+                    print(f"⚠️ 日期解析失败 '{date_str}'，跳过: {e}")
+                    continue
+                
+                # 尝试匹配本地封面（如果有对应的本地视频）
+                cover_path = None
+                video_path = None
+                
+                video_info = VideoInfo(
+                    title=title if title else short_title,
+                    short_title=final_short_title,
+                    description=full_description,
+                    tags=tags,
+                    video_path=video_path or "",
+                    cover_path=cover_path,
+                    publish_date=publish_date,
+                    collections=collections,
+                    original_declaration=bool(original_declaration) if original_declaration is not None else True,
+                    cover_position=cover_position
+                )
+                videos.append(video_info)
+                
+            except Exception as e:
+                print(f"⚠️ 处理 Notion 记录时出错: {e}")
+                continue
+        
+        print(f"✅ 从 Notion 获取到 {len(videos)} 条云端视频记录")
+        
+        # 按日期排序
+        videos.sort(key=lambda x: x.publish_date, reverse=False)
+        
+        return videos
 
 
 if __name__ == "__main__":
