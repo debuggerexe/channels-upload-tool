@@ -1,0 +1,10 @@
+requests
+playwright
+eventlet
+schedule
+cf_clearance
+qrcode
+loguru
+pytz==2024.1
+python-dateutil==2.8.2
+Pillow>=10.0.0
