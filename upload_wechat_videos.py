@@ -190,8 +190,17 @@ class WeChatVideoUploader:
         video_title = video_data['title']
         
         async def on_upload_success():
-            """上传成功后的回调，在浏览器保持打开前执行文件移动"""
-            await self._move_to_published(video_path, video_title)
+            """上传成功后的回调，在浏览器保持打开前执行文件处理"""
+            video_path_str = str(video_path)
+            # 云端下载的临时文件：清理删除
+            if "temp/notion_downloads" in video_path_str:
+                await self._cleanup_temp_files(video_path)
+            # 本地文件（videos/）：保留不动，用户要求保留本地缓存
+            elif "videos/" in video_path_str:
+                print(f"📁 本地视频保留: {Path(video_path).name}")
+            # 其他情况（如 published/ 中的文件）：不处理
+            else:
+                pass
         
         app = TencentVideo(
             short_title=video_data['title'],
@@ -200,13 +209,14 @@ class WeChatVideoUploader:
             publish_date=video_data['publish_date'],
             account_file=self.account_file,
             category=category,
-            original_declaration=self.original_declaration,
-            cover_position=self.cover_position,
+            original_declaration=video_data.get('original_declaration', self.original_declaration),
+            cover_position=video_data.get('cover_position', self.cover_position),
             thumbnail_path=video_data.get('cover_path'),
             keep_open=is_last_video,
             publish_mode=publish_mode,
             collections=video_data.get('collections', self.collections),
-            on_upload_success=on_upload_success if is_last_video else None  # 只有最后一个视频需要回调
+            on_upload_success=on_upload_success if is_last_video else None,  # 只有最后一个视频需要回调
+            location=video_data.get('location', '平台默认')  # 位置设置
         )
         
         # 尝试上传
@@ -280,6 +290,50 @@ class WeChatVideoUploader:
                     print(f"⚠️ 文件夹不存在或已在 published: {folder.name}")
         except Exception as move_error:
             print(f"❌ 移动失败: {move_error}")
+    
+    async def _cleanup_temp_files(self, video_path: str):
+        """
+        清理云端模式的临时文件
+        
+        规范做法：
+        - 临时文件在上传成功后直接删除（源文件在 Notion 云端）
+        - 不保留在 temp 目录中占用空间
+        
+        Args:
+            video_path: 视频文件路径（temp 目录中的文件）
+        """
+        try:
+            video_path_obj = Path(video_path)
+            
+            # 只清理 temp/notion_downloads 目录下的文件
+            if "temp/notion_downloads" not in str(video_path_obj):
+                return
+            
+            # 删除视频文件
+            if video_path_obj.exists():
+                video_path_obj.unlink()
+                print(f"🗑️ 已清理临时视频: {video_path_obj.name}")
+            
+            # 删除对应的封面文件
+            cover_exts = ['.jpg', '.jpeg', '.png', '.webp']
+            for ext in cover_exts:
+                cover_file = video_path_obj.with_suffix(ext)
+                if cover_file.exists():
+                    cover_file.unlink()
+                    print(f"🗑️ 已清理临时封面: {cover_file.name}")
+                    break
+            
+            # 删除裁剪后的封面
+            video_stem = video_path_obj.stem
+            for ext in ['.jpg', '.jpeg', '.png']:
+                crop_file = video_path_obj.parent / f"{video_stem}_crop{ext}"
+                if crop_file.exists():
+                    crop_file.unlink()
+                    print(f"🗑️ 已清理临时裁剪封面: {crop_file.name}")
+                    break
+                    
+        except Exception as e:
+            print(f"⚠️ 清理临时文件失败: {e}")
     
     async def upload_all_videos(self, publish_mode: str = '1', skip_confirm: bool = False) -> bool:
         """上传所有视频（本地模式）"""
@@ -391,6 +445,10 @@ class WeChatVideoUploader:
         
         async with async_playwright() as playwright:
             for idx, video in enumerate(videos):
+                # 【关键】使用每个视频自己的 publish_mode（如果有），否则使用传入的默认值
+                video_publish_mode = video.publish_mode if video.publish_mode else publish_mode
+                print(f"\n📤 正在上传: {video.name_for_match} (发布方式: {'定时发布' if video_publish_mode == '1' else '保存草稿'})")
+                
                 # 组装视频数据
                 video_data = {
                     'title': video.short_title,
@@ -398,28 +456,38 @@ class WeChatVideoUploader:
                     'video_path': video.video_path,
                     'cover_path': video.cover_path,
                     'publish_date': video.publish_date,
-                    'collections': video.collections
+                    'collections': video.collections,
+                    'original_declaration': video.original_declaration,
+                    'cover_position': video.cover_position,
+                    'location': video.location  # 位置设置
                 }
                 
                 # 判断是否是最后一个视频
                 is_last_video = (idx == len(videos) - 1)
                 
-                # 使用公共方法上传
+                # 使用公共方法上传，传入视频的 publish_mode
                 success = await self._upload_single_video(
-                    video_data, playwright, is_last_video, publish_mode
+                    video_data, playwright, is_last_video, video_publish_mode
                 )
                 
                 if success:
                     success_count += 1
-                    # 移动到 published 目录（最后一个视频通过回调移动）
-                    if not is_last_video:
-                        await self._move_to_published(video.video_path, video.title)
+                    # 云端模式：清理临时文件（最后一个视频通过回调清理）
+                    # 本地文件保留不动
+                    video_path_str = str(video.video_path)
+                    if not is_last_video and "temp/notion_downloads" in video_path_str:
+                        await self._cleanup_temp_files(video.video_path)
+                    elif "videos/" in video_path_str:
+                        print(f"📁 本地视频保留: {video.name_for_match}")
                 
                 # 如果不是最后一个视频，添加延迟
                 if not is_last_video:
                     await asyncio.sleep(5)
         
         # 上传完成统计
+        print(f"\n{'='*60}")
+        print(f"上传完成！成功上传 {success_count}/{len(videos)} 个视频")
+        print(f"{'='*60}")
         return success_count > 0
 
 
@@ -429,7 +497,7 @@ async def main():
     
     # ==================== 命令行参数解析 ====================
     parser = argparse.ArgumentParser(description='微信视频号批量上传工具')
-    parser.add_argument('--mode', choices=['local', 'notion'], help='数据源模式: local=本地模式, notion=云端模式')
+    parser.add_argument('--mode', choices=['local', 'notion', 'cloud'], help='数据源模式: local=本地模式, notion=Notion匹配模式, cloud=纯云端模式')
     parser.add_argument('--publish', choices=['1', '2'], help='发布方式: 1=定时发布, 2=保存草稿')
     parser.add_argument('--no-interactive', action='store_true', help='非交互模式（使用默认值或命令行参数）')
     args = parser.parse_args()
@@ -475,7 +543,9 @@ async def main():
             print("\n✅ 已选择：本地模式（命令行参数）")
             data_source = LocalDataSource(config)
         elif mode == 'notion':
-            print("\n✅ 已选择：云端模式（命令行参数）")
+            print("\n✅ 已选择：Notion匹配模式（命令行参数）")
+            print("\n📁 将扫描 videos/ 文件夹中的视频，并从 Notion 获取标题/描述/标签")
+            
             # 优先从 config 读取，否则检查环境变量
             notion_token = config.get('notion_api_token', '').strip()
             if not notion_token:
@@ -489,6 +559,32 @@ async def main():
                 data_source = NotionDataSource(config)
             except ValueError as e:
                 print(f"\n❌ Notion 初始化失败: {e}")
+                return
+        elif mode == 'cloud':
+            print("\n☁️ 已选择：纯云端模式（命令行参数）")
+            print("\n☁️ 所有数据（包括视频文件）将从 Notion 云端获取")
+            
+            # 云端模式只需要 Notion 配置
+            notion_token = config.get('notion_api_token', '').strip()
+            if not notion_token:
+                notion_token = os.getenv('NOTION_API_TOKEN', '')
+            if not notion_token:
+                print("\n❌ 云端模式需要设置 NOTION_API_TOKEN（环境变量或 config.json）")
+                return
+            
+            # 临时设置环境变量
+            os.environ['NOTION_API_TOKEN'] = notion_token
+            
+            # 云端模式：只需要 Notion 相关配置
+            cloud_config = {
+                'notion_database_id': config.get('notion_database_id', ''),
+                'notion_database_name': config.get('notion_database_name', '')
+            }
+            
+            try:
+                data_source = NotionDataSource(cloud_config)
+            except ValueError as e:
+                print(f"\n❌ 云端模式初始化失败: {e}")
                 return
     else:
         # ==================== 交互式菜单 ====================
@@ -606,22 +702,45 @@ async def main():
                     import traceback
                     traceback.print_exc()
         
-        # 云端模式
-        elif mode == 'notion':
+        # 云端模式（纯云端，不依赖本地视频文件）
+        elif mode == 'cloud':
             try:
-                print("\n正在扫描本地视频并匹配 Notion 数据...")
-                videos = data_source.get_videos()
+                print("\n☁️【云端模式】正在从 Notion 获取视频数据...")
                 
-                if not videos:
-                    print("❌ 未找到匹配的视频！")
-                    print("\n请检查：")
-                    print("1. videos/ 文件夹中是否有视频文件")
-                    print("2. Notion 数据库中的视频名称是否与本地匹配")
+                # 从数据源获取云端视频列表（只获取状态为"待发布"的）
+                if hasattr(data_source, 'get_videos_from_cloud'):
+                    videos = data_source.get_videos_from_cloud(status_filter="待发布")
+                else:
+                    print("❌ 数据源不支持云端模式")
                     return
                 
-                print(f"\n找到 {len(videos)} 个匹配的视频")
+                if not videos:
+                    print("❌ 云端模式下未找到可上传的视频！")
+                    print("\n请检查：")
+                    print("1. Notion 数据库中是否有视频记录")
+                    print("2. 视频记录是否包含「视频文件」字段")
+                    return
+                
+                print(f"\n☁️ 找到 {len(videos)} 个云端视频")
                 for v in videos:
-                    print(f"  - {v.folder_name}")
+                    print(f"  - {v.name_for_match}")
+                
+                # 【云端模式特有】下载所有视频文件
+                print("\n⬇️【云端模式】正在下载视频文件...")
+                try:
+                    downloaded_videos = await data_source.download_video_files(videos)
+                    print(f"✅ 成功下载 {len(downloaded_videos)}/{len(videos)} 个视频")
+                    
+                    if not downloaded_videos:
+                        print("❌ 没有成功下载的视频，上传取消")
+                        return
+                    
+                    # 使用下载后的视频列表上传
+                    videos = downloaded_videos
+                    
+                except Exception as e:
+                    print(f"❌ 下载视频文件失败: {e}")
+                    return
                 
                 # 交互模式下询问发布方式
                 if not args.no_interactive and not args.publish:
@@ -643,12 +762,43 @@ async def main():
                 
                 if not publish_choice:
                     publish_choice = '1'  # 默认定时发布
-                    
+                
                 # 创建上传器并执行云端模式上传
-                uploader = WeChatVideoUploader(account_file, data_source)
+                # 云端模式不需要本地数据源的额外配置
+                uploader = WeChatVideoUploader(account_file, data_source=None)
+                
+                # 使用upload_videos_from_source方法上传所有视频
+                # 此方法内部会为每个视频使用自己的publish_mode
                 success = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
-                if not success:
-                    print("\n⚠️ 上传未完成，请检查错误信息后重试")
+                
+                # 更新Notion状态（成功和失败的分别标记）
+                print("\n📝 正在更新Notion状态...")
+                success_count = 0
+                fail_count = 0
+                for video in videos:
+                    if video.notion_page_id:
+                        # 检查视频是否下载成功（有本地路径表示至少下载成功）
+                        if video.video_path and Path(video.video_path).exists():
+                            # 视频下载成功，标记为已发布
+                            if data_source.update_video_status(video.notion_page_id, "已发布"):
+                                print(f"  ✅ {video.name_for_match} -> 已发布")
+                                success_count += 1
+                            else:
+                                print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
+                                fail_count += 1
+                        else:
+                            # 视频下载或上传失败
+                            if data_source.update_video_status(video.notion_page_id, "发布失败"):
+                                print(f"  ❌ {video.name_for_match} -> 发布失败")
+                                fail_count += 1
+                            else:
+                                print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
+                
+                if success_count > 0:
+                    print(f"\n✅ 成功上传 {success_count} 个视频")
+                if fail_count > 0:
+                    print(f"\n❌ {fail_count} 个视频上传失败，已标记为'发布失败'")
+                    
             except Exception as e:
                 if "TargetClosed" in str(e) or "browser has been closed" in str(e):
                     print("\n❌ 登录窗口被关闭或扫码超时")
