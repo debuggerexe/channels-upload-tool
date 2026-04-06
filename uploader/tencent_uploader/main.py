@@ -91,7 +91,7 @@ async def weixin_setup(account_file, handle=False):
 
 
 class TencentVideo(object):
-    def __init__(self, short_title, title_and_tags, file_path, publish_date: datetime, account_file, category=None, original_declaration=True, cover_position='top', thumbnail_path=None, keep_open=False, publish_mode='1', collections=None, on_upload_success=None):
+    def __init__(self, short_title, title_and_tags, file_path, publish_date: datetime, account_file, category=None, original_declaration=True, cover_position='top', thumbnail_path=None, keep_open=False, publish_mode='1', collections=None, on_upload_success=None, location='平台默认'):
         self.short_title = short_title  # 短标题
         self.title_and_tags = title_and_tags  # 标题和话题内容
         self.file_path = file_path
@@ -106,6 +106,7 @@ class TencentVideo(object):
         self.publish_mode = publish_mode  # 发布模式：'1'=定时发布, '2'=保存草稿
         self.collections = collections if collections else []  # 合集名称列表（可选）
         self.on_upload_success = on_upload_success  # 【新增】上传成功后的回调函数
+        self.location = location  # 【新增】位置设置："不显示位置" | "平台默认"
 
     async def set_schedule_time_tencent(self, page, publish_date):
         label_element = page.locator("label").filter(has_text="定时").nth(1)
@@ -399,7 +400,23 @@ class TencentVideo(object):
             tencent_logger.error(f"处理封面失败: {e}")
             await page.screenshot(path="cover_upload_error.png")
 
-    async def set_no_location(self, page):
+    async def set_location(self, page):
+        """
+        设置视频位置
+        
+        Args:
+            page: Playwright 页面对象
+        
+        根据 self.location 的值决定如何处理位置：
+        - "不显示位置": 点击位置区域，选择"不显示位置"
+        - "平台默认": 跳过，保持平台默认加载的内容
+        """
+        # 如果设置为平台默认，跳过位置设置
+        if self.location == "平台默认":
+            tencent_logger.info("位置设置为'平台默认'，跳过位置设置")
+            return
+        
+        # 不显示位置：执行原有的设置逻辑
         try:
             # 1. 点击"位置"区域，弹出下拉框
             await page.click('div.label:has-text("位置") + div .position-display-wrap')
@@ -410,6 +427,10 @@ class TencentVideo(object):
             tencent_logger.info("已设置为不显示位置")
         except Exception as e:
             tencent_logger.error(f"设置不显示位置失败: {e}")
+
+    async def set_no_location(self, page):
+        """兼容旧方法，调用 set_location"""
+        await self.set_location(page)
 
     async def upload_cover_image(self, page):
         """查找并上传封面图片"""
@@ -559,9 +580,9 @@ class TencentVideo(object):
                 tencent_logger.info("  [-] 正在执行原创声明...")
                 await self.add_original(page)
             
-            # 5. 设置不显示位置
+            # 5. 设置位置
             tencent_logger.info("  [-] 正在设置位置信息...")
-            await self.set_no_location(page)
+            await self.set_location(page)
             
             tencent_logger.info("  [-] 表单填写完成（封面等待上传完成后处理）")
             
