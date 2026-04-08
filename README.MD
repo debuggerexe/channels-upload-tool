@@ -1,13 +1,13 @@
 # 微信视频号自动上传工具
 
-自动化发布视频到微信视频号平台，**纯云端模式**：所有视频文件和元数据从 Notion 云端获取。
+自动化发布视频到微信视频号平台，支持多种数据源（Notion、飞书、本地文件）。
 
 ## 功能特性
 
-- **纯云端模式**
-  - 从 Notion 数据库获取视频元数据（标题、描述、标签等）
-  - 从 Notion 下载视频文件和封面图片
-  - 支持智能本地缓存：如果 `videos/` 文件夹已有匹配文件，直接使用，避免重复下载
+- **混合模式（Notion/飞书）**
+  - 从 Notion/飞书 数据库获取视频元数据（标题、描述、标签等）
+  - 优先匹配本地 `videos/` 文件夹中的视频，无本地则从云端下载
+  - 智能本地缓存，避免重复下载
 
 - **智能处理**
   - 智能文件名匹配（自动去除日期前缀）
@@ -20,6 +20,47 @@
   - 按发布日期自动排序
   - 失败自动重试（网络波动时自动重试 API 请求）
   - 上传成功后自动清理临时文件，本地缓存保留
+
+---
+
+## 项目架构
+
+```
+📁 channels-upload-tool/
+├── 📄 upload_wechat_videos.py    # 主入口脚本
+├── 📄 conf.py                     # 全局配置
+├── 📄 config.example.json         # 配置模板（复制为 config.json 后填写）
+│
+├── 📁 data_sources/               # 数据源层（抽象基类 + 多实现）
+│   ├── 📄 data_source.py          # VideoDataSource 抽象基类
+│   ├── 📄 VideoInfo (dataclass)   # 统一视频信息数据结构
+│   ├── 📄 notion_data_source.py   # Notion 数据源（混合模式）
+│   ├── 📄 feishu_data_source.py   # 飞书数据源（混合模式）
+│   └── 📄 local_data_source.py    # 本地数据源（txt配置）
+│
+├── 📁 uploader/                   # 上传器层
+│   └── 📁 tencent_uploader/       # 微信视频号上传器
+│       └── 📄 main.py             # Playwright 自动化上传核心
+│
+├── 📁 utils/                      # 工具层
+│   ├── 📄 output_utils.py         # 终端输出模板（5阶段统一输出）
+│   ├── 📄 text_utils.py           # 文本处理（短标题清理、描述组装等）
+│   ├── 📄 match_utils.py          # 文件匹配（本地视频查找、封面匹配）
+│   ├── 📄 download_utils.py       # 云端文件下载
+│   ├── 📄 cover_cropper.py        # 封面裁剪工具
+│   └── 📄 files_times.py          # 文件时间处理
+│
+├── 📁 videos/                     # 本地视频文件夹（gitignored）
+├── 📁 temp/                       # 临时下载文件夹（自动清理）
+├── 📁 cookies/                    # Cookie 存储（gitignored）
+└── 📁 logs/                       # 日志文件（gitignored）
+```
+
+**架构设计原则：**
+- **数据源抽象**：`VideoDataSource` 基类统一接口，支持多数据源无缝切换
+- **混合模式**：优先本地文件，无本地则从云端下载，兼顾速度可靠性
+- **终端输出统一**：5阶段标准输出（数据获取→状态筛选→本地扫描→匹配结果→上传汇总）
+- **配置分离**：敏感信息放 `config.json`（gitignored），模板放 `config.example.json`
 
 ---
 
@@ -59,7 +100,7 @@ cp config.example.json config.json
 # 编辑 config.json，填入 Notion API Token 和数据库信息
 ```
 
-## 云端模式（Notion）
+## 混合模式（Notion）
 
 ### Notion 数据库字段
 
@@ -77,17 +118,17 @@ cp config.example.json config.json
 | **声明原创** | **Checkbox** | **是否声明原创** | 可选（默认true） |
 | **封面裁剪** | **Select** | **top/middle/bottom** | 可选（默认middle） |
 | **位置** | **Select** | **不显示位置/平台默认** | 可选（默认平台默认） |
-| **发布状态** | **Select** | **待发布/已发布/发布失败** | 云端模式必填 |
+| **发布状态** | **Select** | **待发布/已发布/发布失败** | 混合模式必填 |
 | **发布方式** | **Select** | **定时发布/保存草稿** | 可选 |
 
 **字段说明：**
-- **发布状态**（云端模式）：控制视频上传流程
+- **发布状态**（混合模式）：控制视频上传流程
   - `待发布`：脚本会筛选并上传这些视频
   - `已发布`：上传完成后脚本自动更新为此状态
   - `发布失败`：上传或下载失败时脚本自动更新为此状态
   - 只有 `待发布` 和 `发布失败` 的视频会被处理（发布失败会自动重试）
   - 上传成功后，无论之前是待发布还是发布失败，都会更新为 `已发布`
-- **发布方式**（云端模式）：控制视频的发布方式
+- **发布方式**（混合模式）：控制视频的发布方式
   - `定时发布`：按 `发布日期` 字段的时间定时发布
   - `保存草稿`：保存到草稿箱，不立即发布
   - 优先级逻辑：
@@ -202,6 +243,101 @@ export NOTION_API_TOKEN='your_token'
 
 ---
 
+## 混合模式（飞书）
+
+项目同时支持 **飞书多维表格** 作为数据源，与 Notion 混合模式完全兼容。
+
+### 快速开始（飞书）
+
+```bash
+source .venv/bin/activate && python upload_wechat_videos.py --mode feishu --no-interactive
+```
+
+### 飞书配置获取步骤
+
+1. **创建飞书应用**
+   - 访问 [飞书开放平台](https://open.feishu.cn)
+   - 创建企业自建应用
+   - 获取 **App ID** 和 **App Secret**
+
+2. **添加应用权限（批量导入）**
+   - 进入应用详情 → 权限管理
+   - 点击「批量导入/导出权限」按钮
+   - 粘贴以下 JSON 配置：
+   ```json
+   {
+     "scopes": {
+       "tenant": [
+         "base:record:read",
+         "base:record:write",
+         "base:file:read",
+         "bitable:app",
+         "bitable:app:readonly",
+         "drive:file:download",
+         "drive:file:readonly"
+       ],
+       "user": []
+     }
+   }
+   ```
+   - 点击「下一步」→「确认新增权限」→「申请开通」
+   - **发布应用版本**使权限生效（版本管理与发布 → 创建版本 → 保存并发布）
+
+3. **添加应用为表格协作者（关键步骤）**
+   - 打开目标多维表格
+   - 点击右上角「分享」按钮（或「...」→「分享」）
+   - 在协作者搜索框中输入你的应用名称（如「uploadbot」）
+   - 选择应用并赋予**「可编辑」或「可查看」权限**
+   - 点击「发送」或「确认」
+   - ⚠️ **如果不执行此步骤，应用无法访问你的个人表格，会报 `RolePermNotAllow` 错误**
+
+4. **获取多维表格Token**
+   - 打开目标多维表格
+   - 从URL中复制 `app_token`（如 `CqZ5b6kQia...`）
+   - 记录 `table_id`（如 `tblm3I9JaZ9JeIs7`）
+
+### 飞书混合模式
+
+由于飞书 API 权限限制，个人用户可能无法直接通过 API 读取多维表格记录。混合模式提供优雅的降级方案：
+
+**工作原理：**
+1. 尝试从飞书读取视频配置（标题、描述、发布日期等）
+2. 从本地 `videos/` 文件夹匹配视频文件
+3. 如果飞书 API 权限不足，自动回退到本地模式
+
+**优势：**
+- 无需复杂的权限申请和审核
+- 配置管理在飞书，视频文件在本地
+- 自动回退机制，确保上传不中断
+
+### 飞书多维表格字段
+
+字段名称与 Notion 完全一致，方便迁移：
+
+| 字段 | 类型 | 说明 | 必填 |
+|------|------|------|------|
+| `Name` | 文本 | 视频名称（用于标识），同时用于匹配本地视频文件名 | ✅ |
+| `短标题` | 文本 | 视频号短标题（16字以内），只保留中文字符 | ✅ |
+| `标题` | 文本 | 视频号主标题（显示在视频下方） | 可选 |
+| `描述` | 文本 | 视频描述区内容 | 可选 |
+| `标签` | 文本 | 话题标签（如 `#话题1 #话题2`） | 可选 |
+| `合集` | 多选 | 视频合集名称列表（可多选） | 可选 |
+| `发布日期` | 日期 | 发布日期时间，可只填日期（默认 09:00）或完整时间 | ✅ |
+| **视频** | 附件 | **视频文件附件** | ✅ |
+| **封面** | 附件 | **封面图附件** | 可选 |
+| **声明原创** | 勾选 | **是否声明原创** | 可选（默认true） |
+| **封面裁剪** | 单选 | **top/middle/bottom** | 可选（默认middle） |
+| **位置** | 单选 | **不显示位置/平台默认** | 可选（默认平台默认） |
+| **发布状态** | 单选 | **待发布/已发布/发布失败** | 混合模式必填 |
+| **发布方式** | 单选 | **定时发布/保存草稿** | 可选 |
+
+**与 Notion 的区别：**
+- 飞书多维表格在国内访问更快更稳定
+- 文件存储在飞书云文档中
+- 相同的字段逻辑和发布流程
+
+---
+
 ## 配置说明
 
 **配置文件优先级：**
@@ -224,7 +360,11 @@ nano config.json
 {
   "notion_api_token": "secret_xxxxxxxxxxxxxxxxxxxx",
   "notion_database_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "notion_database_name": "视频发布库"
+  "notion_database_name": "视频发布库",
+  "feishu_app_id": "cli_xxxxxxxxxxxxxxxx",
+  "feishu_app_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "feishu_bitable_token": "VvgbbVCOxxxxxxxxxxxxxxxx",
+  "feishu_table_id": "tblxxxxxxxxxxxxxxxx"
 }
 ```
 
@@ -232,13 +372,15 @@ nano config.json
 
 | 配置项 | 类型 | 说明 |
 |--------|------|------|
-| `notion_api_token` | string | Notion API Token（必需） |
+| `notion_api_token` | string | Notion API Token（Notion模式必需） |
 | `notion_database_id` | string | Notion 数据库 ID（二选一） |
 | `notion_database_name` | string | Notion 数据库名称（二选一） |
+| `feishu_app_id` | string | 飞书应用 ID（飞书模式必需） |
+| `feishu_app_secret` | string | 飞书应用密钥（飞书模式必需） |
+| `feishu_bitable_token` | string | 飞书多维表格 Token（飞书模式必需） |
+| `feishu_table_id` | string | 飞书多维表格 ID（可选） |
 
-> **注意**：其他配置（发布时间、原创声明、封面裁剪、合集等）全部从 Notion 数据库读取，无需在 config.json 中设置。
-
-**注意：** `config.json` 包含个人配置，已添加到 `.gitignore`，不会上传到 GitHub。
+> **注意**：其他配置（发布时间、原创声明、封面裁剪、合集等）全部从云端数据库读取，无需在 config.json 中设置。
 
 ---
 
@@ -303,7 +445,8 @@ upload_videos_from_source() # 云端模式 → 调用公共方法
 ```
 ├── data_sources/          # 数据源模块
 │   ├── data_source.py      # 抽象基类
-│   └── notion_data_source.py # Notion 云端实现
+│   ├── notion_data_source.py # Notion 云端实现
+│   └── feishu_data_source.py # 飞书云端实现
 ├── uploader/
 │   └── tencent_uploader/   # 微信视频号上传器
 ├── utils/                  # 工具模块
@@ -332,6 +475,322 @@ playwright install
 ---
 
 ## 更新日志
+
+### 2026-04-07 (功能增强 - 飞书记录创建)
+- **新增 `FeishuDataSource.create_record()` 方法**
+  - 支持创建飞书多维表格新记录
+  - 提供 `create_video_record()` 快捷方法，简化视频记录创建
+  - 使用现有飞书SDK，无需额外认证步骤
+  - 使用示例：
+    ```python
+    source = FeishuDataSource(config)
+    record_id = source.create_video_record(
+        name="视频名称",
+        title="视频标题",
+        short_title="短标题",
+        description="视频描述",
+        tags="标签1,标签2",
+        publish_date="2024-01-15"
+    )
+    ```
+
+### 2026-04-08 (代码清理 - 删除重复函数)
+- **删除 `uploader/tencent_uploader/main.py` 中的重复函数**
+  - 问题：`format_str_for_short_title()` 与 `utils/text_utils.py::sanitize_short_title()` 逻辑完全相同
+  - 修复：删除 `main.py` 中的重复实现，改为从 `text_utils` 导入
+  - 保持代码 DRY 原则，统一短标题处理逻辑
+
+### 2026-04-08 (命名统一 - 云端模式→混合模式)
+- **统一"云端模式"命名为"混合模式"**
+  - 重命名：`get_videos_from_cloud()` → `get_videos_hybrid()`（Notion/飞书数据源）
+  - 更新所有注释、终端输出、文档中的命名
+  - 更新 `README.MD` 章节标题和说明文字
+  - 反映实际逻辑：优先本地文件，无本地则从云端下载
+
+### 2026-04-08 (架构精简 - 移除飞书回退模式)
+- **移除飞书数据源的"回退到本地模式"逻辑**
+  - 项目已统一为单一"混合模式"，不再需要回退逻辑
+  - 删除 `FeishuDataSource._get_videos_from_local()` 方法
+  - 删除相关回退提示和5阶段回退输出模板
+  - 飞书获取失败时直接抛出异常，由上层处理
+  - 保留 `_scan_videos()` 方法用于混合模式下的本地视频匹配
+
+### 2026-04-08 (代码重构 - 终端输出统一)
+- **统一 Notion 和飞书的终端输出格式**
+  - 移除 Notion 纯云端模式（--mode cloud），统一为混合模式
+  - Notion 和飞书使用相同的 5 阶段终端输出模板：
+    1. 数据获取：`📡 从 [Notion/飞书] 获取视频数据...`
+    2. 状态筛选：`📋 中待上传的视频 (X 个，按日期排序)`
+    3. 本地扫描：`📁 扫描本地视频...`
+    4. 匹配结果：`📊 匹配结果：本地 X / 需下载 X / 无来源 X`
+    5. 上传汇总：`🎬 共 X 个视频准备上传`
+  - **终端输出模板公共封装**（新增 `utils/output_utils.py`）：
+    - `print_data_source_header()` - 阶段1头部
+    - `print_records_returned()` - 返回记录数量
+    - `print_pending_videos()` / `print_pending_video_item()` - 阶段2待上传列表
+    - `print_skipped_non_pending()` / `print_no_videos_warning()` - 跳过提示
+    - `print_scan_local_videos()` - 阶段3本地扫描
+    - `print_match_summary()` - 阶段4匹配结果
+    - `print_final_video_summary()` - 阶段5最终汇总
+  - Notion 和飞书数据源统一调用公共函数，消除重复代码
+  - 保留 `[本地]`/`[云端]` 来源标记，便于区分视频来源
+
+### 2026-04-08 (Bug修复 - 飞书云端视频下载)
+- **修复飞书模式下云端视频未下载直接上传导致失败的问题**
+  - 问题：飞书混合模式下，本地没有的视频（需要云端下载）直接上传会失败
+  - 错误：`Frame.set_input_files() missing 1 required positional argument: 'files'`
+  - 原因：`upload_wechat_videos.py` 的飞书模式缺少下载逻辑
+  - 修复：在飞书模式下添加与 Notion 相同的下载逻辑
+    - 检测需要下载的视频：`need_download = any(v.video_url and not v.video_path for v in videos)`
+    - 调用 `data_source.download_video_files(videos)` 下载云端视频
+    - 下载成功后继续上传流程
+
+### 2026-04-08 (架构重构 - 统一下载逻辑到基类)
+- **提取公共下载逻辑到 `VideoDataSource` 基类**
+  - 将 `download_video_files()` 和 `_download_file_async()` 提取到基类
+  - 删除 `FeishuDataSource` 中的重复实现（约 150 行代码）
+  - 删除 `NotionDataSource` 中的重复实现（约 150 行代码）
+  - Notion 和飞书现在继承基类的下载方法，代码复用
+  - 修复基类 `__init__` 调用，确保 `temp_dir` 和 `videos_dir` 正确初始化
+
+### 2026-04-08 (Bug修复 - 飞书状态筛选)
+- **修复飞书数据源不支持「发布失败」状态的问题**
+  - 问题：飞书只筛选「待发布」状态，「发布失败」的视频不会被获取重新上传
+  - 修复：移除 API 层筛选（`containsAny` 操作符不支持），改为本地 Python 筛选
+    - 先获取所有记录，然后用列表推导式筛选状态
+    - 支持多个状态：`["待发布", "发布失败"]`
+  - 修复日期格式：飞书返回毫秒时间戳，转换为 `YYYY-MM-DD` 显示
+  - 默认筛选状态改为 `["待发布", "发布失败"]`，与 Notion 保持一致
+
+### 2026-04-08 (UI优化 - 终端输出按日期排序)
+- **修复终端输出中视频列表未按日期排序的问题**
+  - 问题：`📋 Notion 中待上传的视频` 列表按 Notion 返回顺序显示，未按发布日期排序
+  - 修复：在 `notion_data_source.py` 输出列表前，添加 `pending_pages.sort(key=get_page_date)` 按发布日期排序
+  - 飞书数据源已在 `_process_feishu_records()` 最后进行 `videos.sort(key=lambda x: x.publish_date)` 排序
+  - Notion 和飞书最终都按发布日期从小到大排序显示
+
+### 2026-04-08 (Bug修复 - 短标题过滤规则)
+- **修复短标题错误过滤数字、英文的问题**
+  - 问题：`sanitize_short_title()` 使用 `[^\u4e00-\u9fa5]` 过滤，导致数字、英文被删除
+  - 示例：`"2007年的一首情诗"` → `"年的一首情诗"`（数字丢失）
+  - 修复：按视频号平台规则重新设计过滤逻辑
+    - 保留中文、英文、数字
+    - 仅允许指定符号：书名号《》、引号"、冒号：、加号+、问号?、百分号%、摄氏度°
+    - 逗号（中英文）替换为空格
+    - 保留长度处理：不足6字填充，超过16字截断
+  - Notion 和飞书共用 `utils/text_utils.py::sanitize_short_title()` 公共函数
+
+### 2026-04-08 (Bug修复 - 描述换行和空行)
+- **修复飞书描述字段换行和空行丢失/过多的问题**
+  - 问题1：`keyboard.type()` 方法会将 `\n` 当作回车键输入，导致换行符丢失
+  - 修复：改为使用 `editor.fill()` 方法直接填充内容，保留原始换行符
+  - 问题2：`assemble_description()` 中的 `strip()` 会去除首尾空白，可能压缩空行
+  - 修复：改为 `strip('\n\r\t ')` 仅去除首尾特定字符，保留内部段落结构
+  - 问题3：飞书数据源 `_extract_field()` 中的 `if text:` 过滤了空字符串，导致空行丢失
+  - 修复：对「描述」「说明」「详情」字段保留空行（空字符串），确保段落结构完整传递
+  - 问题4：飞书返回的多行文本每行末尾带有空格，导致额外的空行
+  - 修复：对每行内容使用 `rstrip()` 去除行尾空格，保留用户主动输入的空行结构
+
+### 2026-04-08 (Bug修复 - 飞书发布时间获取)
+- **修复飞书数据源无法获取指定发布时间（几时几分）的问题**
+  - 根因：飞书返回的是毫秒时间戳整数，而 `parse_publish_date()` 整数分支用 `replace(hour=default_hour, minute=default_minute)` 覆盖了原始时间
+  - 修复：整数分支直接返回转换后的 datetime，不再覆盖小时和分钟
+  - 同时增强支持毫秒时间戳字符串（纯数字，如 `'1778389200000'`）→ 直接转换为 datetime，保留原始时间
+  - 同时支持空格分隔的日期时间格式（`2025-01-15 14:30`、`2025/05/06 13:00`）
+  - 同时支持横杠或斜杠分隔的日期（`2025-01-15`、`2026/05/06`）
+  - 这是公共函数，Notion 和飞书共用同一套日期解析逻辑
+
+### 2026-04-08 (优化 - 视频排序和日期显示)
+- **统一视频上传顺序为按云端发布日期从小到大排序**
+  - 修复飞书数据源 `_process_feishu_records()` 缺少排序的问题，添加 `videos.sort(key=lambda x: x.publish_date)`
+  - Notion 数据源已有排序，保持不变
+  - 确保先上传 1月1日 再上传 1月2日，先上传 1:00 再上传 1:01
+- **优化终端输出，显示每个视频的云端发布日期**
+  - 视频列表显示：`  - 视频名称 (2025-01-15 09:00)`
+  - 上传过程显示：`📤 正在上传: 视频名称 (发布日期: 2025-01-15 09:00, 方式: 定时发布)`
+  - 飞书数据源处理记录时显示完整日期时间
+
+### 2026-04-08 (Bug修复 - Notion混合模式状态更新)
+- **修复 `--mode notion` 上传成功后云端状态未更新的问题**
+  - 问题：`--mode notion` 缺少上传处理代码分支，导致 `update_video_status()` 从未执行
+  - 修复：添加完整的 Notion 混合模式上传处理逻辑（约 90 行），包含状态更新
+  - 封装：提取 `update_videos_publish_status()` 公共函数，统一处理 Notion/飞书状态更新，消除 3 处重复代码
+
+### 2026-04-08 (Bug修复 - 视频上传检测循环)
+- **修复视频上传完成后 detect_upload_status 无限循环的问题**
+  - 问题：严格检测封面编辑按钮导致一直等待（有些视频封面编辑区域没有明显按钮）
+  - 修复：恢复按钮就绪+视频预览就绪的检测条件，移除强制的封面编辑按钮检测
+  - 封面编辑区域状态交由 handle_cover 函数自行检测处理
+
+### 2026-04-08 (Bug修复 - 大视频串行上传)
+- **修复大视频上传时表单填写与视频上传并行执行导致的问题**
+  - 问题：并行执行时，`detect_upload_status` 检测到发表按钮启用后，`fill_form_during_upload` 立即开始执行表单填写，但此时视频还在处理中（大视频可能需要16秒以上），导致表单填写逻辑在视频未就绪时执行，封面处理被跳过
+  - 修复：改为串行执行，先等待 `detect_upload_status` 完成（按钮启用+视频预览就绪），再执行 `fill_form_during_upload`
+  - 变更：移除 `asyncio.gather` 并行执行，改为顺序 `await`
+
+### 2026-04-08 (Bug修复 - 话题标签重复#)
+- **修复第一个话题标签出现双#的问题（如 `##诺基亚`）**
+  - **根因**：Notion "标签"字段已包含 `#诺基亚`，但 `format_tags()` 函数又给每个标签加了 `#`，变成 `##诺基亚`
+  - **修复**：修改两处 `format_tags` 代码（`assemble_description()` 内和独立函数），检查标签是否已有 `#` 前缀，有则不再添加
+  - **代码变更**：`f"#{tag}"` → `f"#{tag}" if not tag.startswith('#') else tag`
+
+### 2026-04-08 (Bug修复 - 大视频上传检测)
+- **修复大视频上传未完成就继续执行的问题**
+  - 问题：近1GB大视频上传时，`detect_upload_status` 仅检测"发表"按钮状态，按钮启用时视频实际还在后台处理，导致封面处理失败
+  - 修复：增加视频封面预览元素检测（检查 `.cover-wrap img` 等选择器的 `src` 属性），确保视频真正处理完成才继续
+  - 优化：每10次检测输出一次进度状态（按钮就绪/预览就绪/上传中），避免日志刷屏
+
+### 2026-04-08 (UI优化 - 去除重复输出)
+- **移除终端重复输出**
+  - 问题：`notion_data_source.get_videos()` 和 `upload_wechat_videos.py` 都输出视频列表，导致重复显示
+  - 修复：移除 `upload_wechat_videos.py` 中的 `🎬 共 X 个视频准备上传` 重复输出（保留 `notion_data_source.py` 中带 `[本地]`/`[云端]` 标记的版本）
+
+### 2026-04-07 (Bug修复 - 发布状态更新)
+- **修复上传成功后未更新发布状态的问题**
+  - 问题：`upload_videos_from_source` 返回布尔值，状态更新时检查临时文件是否还存在（但上传后已被清理），导致误判为发布失败
+  - 修复：修改为返回 `{'success': [...], 'failed': [...]}` 格式，根据实际上传结果更新状态
+  - 统一 Notion 和飞书的状态更新逻辑
+
+### 2026-04-07 (UI优化 - 终端输出重构)
+- **重构 Notion 模式终端输出顺序**
+  - 新顺序：模式标识 → Notion待上传列表 → 本地扫描 → 匹配结果 → 下载列表 → 上传汇总
+  - 清晰区分：本地已有视频 vs 需要下载视频 vs 无来源视频
+  - 显示每个视频的发布状态和发布日期
+  - 跳过非待发布视频时给出明确提示
+
+### 2026-04-07 (UI优化 - 终端输出简化)
+- **简化终端输出，去除重复内容**
+  - 移除重复的【Notion匹配模式】标题输出
+  - 移除重复的本地匹配成功提示（由 `match_utils.py` 统一打印）
+  - 移除重复的"准备上传"提示，改为最后统一显示汇总
+
+### 2026-04-07 (Bug修复 - 语法错误)
+- **修复 `notion_data_source.py` 第558行语法错误**
+  - 问题：`print("` 字符串跨行未闭合导致 `SyntaxError: unterminated string literal`
+  - 修复：合并为单行 `print("\n📁 扫描本地视频...")`
+
+### 2026-04-07 (UI优化 - 终端输出美化)
+- **优化终端输出格式，参考 Claude Code 设计风格**
+  - 新增 `utils/output_utils.py` - 统一输出工具模块
+    - 提供 `header()`, `section()`, `success()`, `error()`, `warning()` 等格式化函数
+    - 统一图标和颜色代码，支持 ANSI 颜色
+  - 简化输出信息，去除重复和冗余内容
+  - 修复乱码字符问题
+  - 输出层次更清晰：使用缩进和统一前缀（• ✓ ↓ ⚠）
+
+### 2026-04-07 (代码重构 - 第三阶段：文件夹日期提取)
+- **提取 `extract_date_from_folder` 到公共模块**
+  - 新增 `utils/text_utils.py::extract_date_from_folder()`
+  - 支持从文件夹名提取 YYMMDD 格式日期（如 `240815_视频名` → 2024-08-15）
+  - 统一替换三处重复实现：
+    - `local_data_source.py` - 本地数据源
+    - `upload_wechat_videos.py` - 主上传程序
+    - 原 `notion_data_source.py` 通过 `remove_date_prefix` 复用
+
+### 2026-04-07 (代码重构 - 第二阶段：日期/发布方式/合集处理)
+- **提取更多公共逻辑到共享模块**
+  - 新增 `utils/download_utils.py` - 通用文件下载工具
+    - `download_file_async()` - 异步下载带重试机制
+    - `generate_video_filename()` / `generate_cover_filename()` - 文件名生成
+  - 扩展 `utils/text_utils.py`
+    - `parse_publish_date()` - 统一日期解析（支持 ISO、时间戳、纯日期格式）
+    - `calculate_publish_mode()` - 统一发布方式计算逻辑
+    - `parse_collections()` - 统一合集字符串解析
+  - 移除重复代码
+    - 删除 `notion_data_source.py` 和 `feishu_data_source.py` 中的 `_calculate_publish_mode` 方法
+    - 更新两处数据源使用公共的日期解析、发布方式计算、合集处理函数
+
+### 2026-04-07 (配置清理 - 移除本地模式配置)
+- **清理过期配置项** - 移除不再需要的本地模式配置 `publish_times`
+  - 问题原因：项目已转变为纯云端模式，但代码中仍在使用 `publish_times` 本地配置
+  - 修复方案：发布时间完全从 Notion/飞书「发布日期」字段获取，默认时间固定为 09:00
+  - 影响文件：`notion_data_source.py`, `feishu_data_source.py`, `upload_wechat_videos.py`
+  - `config.example.json` 现在只保留飞书和 Notion 的 API 凭证配置
+
+### 2026-04-07 (Bug修复 - 飞书描述换行符)
+- **修复飞书描述字段换行符丢失问题** - 多行文本字段正确处理换行
+  - 问题原因：飞书API将多行文本作为列表返回，原代码用 `, ` 连接导致换行符丢失
+  - 修复方案：对于「描述」等多行文本字段，改用 `\n` 连接列表元素
+  - Notion 数据源不受影响（其 rich_text 类型正确使用了 `"".join()`）
+  - 确保描述格式统一为：标题 + 换行 + 描述 + 换行 + 标签
+
+### 2026-04-07 (代码重构 - 公共逻辑抽取)
+- **统一抽取公共函数** - 消除飞书与Notion数据源中的重复代码
+  - 新建 `utils/text_utils.py` - 文本处理公共模块
+    - `sanitize_short_title()` - 短标题清理（过滤非中文字符、填充至6字、截断至16字）
+    - `assemble_description()` - 描述统一组装（标题 + 描述 + 标签去重）
+  - 扩展 `utils/match_utils.py` - 添加本地文件匹配函数
+    - `match_local_video()` - 本地视频文件智能匹配（直接匹配/去除前缀/相似度）
+    - `match_local_cover()` - 本地封面图匹配
+  - 飞书和Notion数据源统一调用公共函数，消除代码重复
+  - 核心逻辑完全一致，仅数据源渠道不同（飞书Bitable vs Notion Database）
+
+### 2026-04-07 (Bug修复 - 标签重复问题)
+- **修复飞书模式标签重复填入** - 描述字段已包含标签时不再重复追加
+  - 优化标签存在检测逻辑：检查以#开头的行、格式化标签是否已在描述中、描述中是否包含#字符
+  - 统一飞书和Notion的标签处理逻辑，确保行为一致
+  - 解决 `description` 字段本身包含标签（但不在行首）导致的重复问题
+- **修复 `--mode notion` 无响应问题** - 添加缺失的 notion 模式处理逻辑
+  - 支持本地视频 + Notion 元数据匹配模式
+  - 统一使用 `upload_videos_from_source` 方法上传
+- **修复 notion 匹配模式缺少状态筛选** - 恢复原本的状态过滤逻辑
+  - `get_videos` 方法现在只处理"待发布"和"发布失败"状态
+  - 跳过已发布的视频，避免重复上传
+- **将 Notion 改为混合模式** - 与飞书逻辑完全一致
+  - 优先匹配本地 videos/ 文件夹中的视频
+  - 本地没有时，从 Notion「视频」字段获取URL并下载
+  - 复用飞书的描述组装和标签去重逻辑
+
+### 2026-04-06 (代码优化 - 模块化与清理)
+- **统一飞书与 Notion 逻辑** - 两种数据源除渠道外完全一致
+  - 复用临时文件清理逻辑（`temp/notion_downloads` 和 `temp/feishu_downloads`）
+  - 统一描述组装逻辑（标题 + 描述 + 标签去重）
+  - 统一下载/清理流程
+- **移除调试日志** - 清理飞书中的 `🔍 [调试]` 和 `🔍 [字段调试]` 输出
+  - 优化终端输出为交付级标准
+  - 保留关键用户提示（成功/失败/跳过）
+
+### 2026-04-06 (功能完成 - 飞书云端模式)
+- **飞书云端模式完整实现** - 支持从飞书多维表格读取配置并下载视频
+  - 修复 API 调用，使用正确的 `/records/search` 端点
+  - 修复附件下载，添加飞书认证头
+  - 支持优先本地视频、无本地则从云端下载的混合模式
+  - 支持视频和封面自动下载
+  - 修复日期时间戳解析
+- **代码健壮性**
+  - 添加缺失的 `json` 模块导入
+  - 添加 `view_id` 属性支持
+  - 详细的权限错误诊断提示
+
+### 2026-04-06 (Bug修复 - 飞书权限问题)
+- **修复飞书 API 调用** - 解决 `RolePermNotAllow` 权限错误
+  - 使用正确的 `/records/search` API 端点（POST 请求）
+  - 添加详细的权限错误诊断信息
+  - 明确提示用户需要将应用添加为表格协作者
+- **代码健壮性增强**
+  - 修复缺失的 `json` 模块导入
+  - 修复缺失的 `view_id` 属性
+  - 改进错误提示，提供具体解决步骤
+
+### 2026-04-06 (功能 - 飞书多维表格集成)
+- **新增飞书云端模式** - 支持飞书多维表格作为数据源
+  - 新增 `FeishuDataSource` 类实现 `VideoDataSource` 接口
+  - 支持从飞书多维表格读取视频元数据（标题、描述、标签等）
+  - 支持从飞书云文档下载视频文件和封面图片
+  - 字段名称与 Notion 完全一致，方便迁移
+  - 支持发布状态自动更新（待发布 → 已发布/发布失败）
+  - 国内访问更快更稳定
+- **CLI更新**
+  - 命令行参数 `--mode` 支持 `feishu` 选项
+  - 交互式菜单支持选择飞书云端模式
+- **配置更新**
+  - `config.json` 新增飞书配置项：
+    - `feishu_app_id` - 飞书应用 ID
+    - `feishu_app_secret` - 飞书应用密钥
+    - `feishu_bitable_token` - 多维表格 Token
+    - `feishu_table_id` - 多维表格 ID（可选）
+- **依赖更新**
+  - 新增 `lark-oapi` 依赖用于飞书 API 调用
 
 ### 2024-04-06 (优化 - 精简项目)
 - **移除冗余功能** - 删除 Web 前后端、本地模式、Notion 匹配模式
@@ -382,4 +841,13 @@ playwright install
   - 清空默认配置中的敏感信息
   - 将默认配置中的个人化字符串改为空值（由用户自行配置）
   - 将代码注释中的个性化示例改为中性示例
+
+---
+
+## TODO / 待办事项
+
+### [待定] 无封面时裁剪默认封面
+- **需求**：当本地和云端都没有封面图时，`cover_position`（top/bottom）字段仍应生效
+- **方案**：用 FFmpeg 截取视频第一帧，然后按 `cover_position` 裁剪为 3:4 比例，最后上传裁剪后的封面
+- **状态**：待开发（不影响现有功能，无封面时平台会自动使用视频第一帧）
 

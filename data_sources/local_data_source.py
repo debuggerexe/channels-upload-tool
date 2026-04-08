@@ -10,11 +10,15 @@ from pathlib import Path
 
 from .data_source import VideoDataSource, VideoInfo
 from conf import BASE_DIR
-from utils.match_utils import (
-    remove_date_prefix,
-    calculate_similarity,
-    select_best_matching_video
+from utils.text_utils import (
+    assemble_description,
+    sanitize_short_title,
+    parse_publish_date,
+    calculate_publish_mode,
+    parse_collections,
+    extract_date_from_folder
 )
+from utils.match_utils import select_best_matching_video
 
 
 class LocalDataSource(VideoDataSource):
@@ -97,8 +101,8 @@ class LocalDataSource(VideoDataSource):
         cover_files = list(folder_path.glob("*.jpg")) + list(folder_path.glob("*.jpeg")) + list(folder_path.glob("*.png"))
         cover_path = str(cover_files[0]) if cover_files else None
         
-        # 获取发布日期
-        folder_date = self.extract_date_from_folder(folder_path.name)
+        # 【使用公共函数】从文件夹名提取日期
+        folder_date = extract_date_from_folder(folder_path.name)
         if folder_date:
             publish_date = folder_date.replace(
                 hour=self.default_publish_hour,
@@ -131,8 +135,8 @@ class LocalDataSource(VideoDataSource):
             if not folder.is_dir():
                 continue
             
-            # 获取文件夹日期
-            folder_date = self.extract_date_from_folder(folder.name)
+            # 【使用公共函数】从文件夹名提取日期
+            folder_date = extract_date_from_folder(folder.name)
             if not folder_date:
                 folder_date = self.config_publish_date
             

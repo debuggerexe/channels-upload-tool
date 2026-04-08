@@ -1,5 +1,9 @@
 {
     "notion_api_token": "",
     "notion_database_id": "",
-    "notion_database_name": ""
+    "notion_database_name": "",
+    "feishu_app_id": "",
+    "feishu_app_secret": "",
+    "feishu_bitable_token": "",
+    "feishu_table_id": ""
 }

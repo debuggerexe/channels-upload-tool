@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 from difflib import SequenceMatcher
 
+from conf import BASE_DIR
+
 
 def remove_date_prefix(text: str) -> str:
     """
@@ -191,3 +193,130 @@ def find_best_match_in_list(
             best_match = candidate
     
     return best_match, best_score
+
+
+def match_local_video(title: str, videos_dir: Optional[Path] = None) -> Optional[Path]:
+    """
+    根据标题匹配本地视频文件
+    
+    匹配策略（按优先级）：
+    1. 直接匹配：标题完全包含在文件夹名中（子文件夹模式）
+    2. 去除前缀匹配：去除常见日期前缀后匹配（子文件夹模式）
+    3. 模糊匹配：使用相似度匹配（子文件夹模式）
+    4. 直接文件匹配：视频文件直接放在videos目录下的匹配
+    
+    Args:
+        title: 视频标题
+        videos_dir: 视频目录路径（默认为 BASE_DIR/videos）
+        
+    Returns:
+        匹配到的视频文件路径，未找到则返回 None
+    """
+    if videos_dir is None:
+        videos_dir = Path(BASE_DIR) / "videos"
+    
+    if not videos_dir.exists():
+        return None
+    
+    if not title:
+        return None
+    
+    # 清理标题（去除前后空格）
+    clean_title = title.strip()
+    
+    candidates = []  # (匹配得分, container_name, video_path)
+    
+    # 【方式1】扫描子文件夹
+    for folder in videos_dir.iterdir():
+        if not folder.is_dir():
+            continue
+        
+        folder_name = folder.name.strip()
+        
+        # 获取视频文件，并选择最佳匹配的
+        video_files = list(folder.glob("*.mp4"))
+        if not video_files:
+            continue
+        video_file, _ = select_best_matching_video(video_files, folder_name, verbose=False)
+        if not video_file:
+            video_file = video_files[0]
+        
+        # 策略1：直接包含匹配（完全匹配或部分匹配）
+        if clean_title in folder_name:
+            score = 100 if folder_name == clean_title else 90
+            candidates.append((score, folder_name, video_file))
+            continue
+        
+        # 策略2：去除常见前缀后匹配
+        clean_folder = remove_date_prefix(folder_name)
+        
+        if clean_title in clean_folder or clean_folder in clean_title:
+            score = 80
+            candidates.append((score, folder_name, video_file))
+            continue
+        
+        # 策略3：模糊匹配（计算相似度）
+        similarity = calculate_similarity(clean_title, clean_folder)
+        if similarity > 0.6:  # 60% 相似度阈值
+            score = int(similarity * 70)  # 最高70分
+            candidates.append((score, folder_name, video_file))
+    
+    # 【方式2】扫描直接放在 videos 目录下的视频文件
+    for video_file in videos_dir.glob("*.mp4"):
+        if not video_file.is_file():
+            continue
+        
+        # 使用文件名（不含扩展名）进行匹配
+        file_name = video_file.stem.strip()
+        clean_file_name = remove_date_prefix(file_name)
+        
+        # 策略1：直接包含匹配
+        if clean_title in file_name:
+            score = 100 if file_name == clean_title else 90
+            candidates.append((score, file_name, video_file))
+            continue
+        
+        # 策略2：去除前缀后匹配
+        if clean_title in clean_file_name or clean_file_name in clean_title:
+            score = 80
+            candidates.append((score, file_name, video_file))
+            continue
+        
+        # 策略3：模糊匹配
+        similarity = calculate_similarity(clean_title, clean_file_name)
+        if similarity > 0.6:
+            score = int(similarity * 70)
+            candidates.append((score, file_name, video_file))
+    
+    # 按得分排序，返回得分最高的
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_match = candidates[0]
+        print(f"✅ 本地匹配成功: '{title}' -> '{best_match[1]}' (得分: {best_match[0]})")
+        return best_match[2]
+    
+    print(f"📥 本地未找到 '{title}'，将从云端下载")
+    return None
+
+
+def match_local_cover(video_path: Path) -> Optional[str]:
+    """
+    匹配本地封面图
+    
+    在与视频文件相同的文件夹中查找封面图片文件
+    
+    Args:
+        video_path: 视频文件路径
+        
+    Returns:
+        封面图片文件路径，未找到则返回 None
+    """
+    folder = video_path.parent
+    cover_extensions = ['.jpg', '.jpeg', '.png', '.webp']
+    
+    for ext in cover_extensions:
+        cover_files = list(folder.glob(f"*{ext}"))
+        if cover_files:
+            return str(cover_files[0])
+    
+    return None

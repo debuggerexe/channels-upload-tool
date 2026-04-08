@@ -13,11 +13,69 @@ from conf import BASE_DIR
 from uploader.tencent_uploader.main import weixin_setup, TencentVideo
 from utils.files_times import get_title_and_hashtags
 from playwright.async_api import async_playwright
+from utils.output_utils import header, section, success, error, warning, info
+from utils.output_utils import list_item, result_summary, mode_badge, empty_state
 
 # 导入数据源
 from data_sources.data_source import VideoInfo
 from data_sources.local_data_source import LocalDataSource
 from data_sources.notion_data_source import NotionDataSource, sanitize_short_title
+from data_sources.feishu_data_source import FeishuDataSource
+
+
+def update_videos_publish_status(data_source, result: dict, source_name: str = "视频") -> Tuple[int, int]:
+    """
+    统一更新视频发布状态（公共函数）
+    
+    Args:
+        data_source: 数据源对象（NotionDataSource 或 FeishuDataSource）
+        result: 上传结果字典 {'success': [VideoInfo], 'failed': [VideoInfo]}
+        source_name: 数据源名称（用于日志输出）
+        
+    Returns:
+        Tuple[int, int]: (成功更新数量, 失败更新数量)
+    """
+    print(f"\n📝 正在更新 {source_name} 发布状态...")
+    success_count = 0
+    fail_count = 0
+    
+    # 标记成功的视频
+    for video in result.get('success', []):
+        if video.notion_page_id:
+            status_updated = False
+            if hasattr(data_source, 'update_video_status'):
+                status_updated = data_source.update_video_status(video.notion_page_id, "已发布")
+            elif hasattr(data_source, 'update_publish_status'):
+                status_updated = data_source.update_publish_status(video.notion_page_id, "已发布")
+            
+            if status_updated:
+                print(f"  ✅ {video.name_for_match} -> 已发布")
+                success_count += 1
+            else:
+                print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
+    
+    # 标记失败的视频
+    for video in result.get('failed', []):
+        if video.notion_page_id:
+            status_updated = False
+            if hasattr(data_source, 'update_video_status'):
+                status_updated = data_source.update_video_status(video.notion_page_id, "发布失败")
+            elif hasattr(data_source, 'update_publish_status'):
+                status_updated = data_source.update_publish_status(video.notion_page_id, "发布失败")
+            
+            if status_updated:
+                print(f"  ❌ {video.name_for_match} -> 发布失败")
+                fail_count += 1
+            else:
+                print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
+    
+    if success_count > 0:
+        print(f"\n✅ 成功上传并标记 {success_count} 个视频")
+    if fail_count > 0:
+        print(f"\n❌ {fail_count} 个视频上传失败")
+    
+    return success_count, fail_count
+
 
 class WeChatVideoUploader:
     def __init__(self, account_file: str, data_source=None):
@@ -78,23 +136,6 @@ class WeChatVideoUploader:
         
         return {}
         
-    def extract_date_from_folder(self, folder_name: str) -> Optional[datetime]:
-        """从文件夹名中提取日期"""
-        # 匹配前6位数字作为日期 (YYMMDD)
-        match = re.match(r'^(\d{6})', folder_name)
-        if not match:
-            return None
-            
-        date_str = match.group(1)
-        try:
-            # 将YYMMDD转换为datetime对象 (假设20xx年)
-            year = 2000 + int(date_str[:2])
-            month = int(date_str[2:4])
-            day = int(date_str[4:6])
-            return datetime(year, month, day)
-        except (ValueError, IndexError):
-            return None
-    
     def get_video_info(self, folder_path: Path) -> Optional[Dict]:
         """获取视频文件夹中的视频、标题和封面信息，使用智能匹配选择视频"""
         video_files = list(folder_path.glob("*.mp4"))
@@ -103,6 +144,7 @@ class WeChatVideoUploader:
             return None
         
         # 【修复】使用智能匹配选择最佳视频文件
+        from utils.text_utils import sanitize_short_title, extract_date_from_folder
         from utils.match_utils import select_best_matching_video
         best_video, score = select_best_matching_video(video_files, folder_path.name, verbose=True)
         if not best_video:
@@ -147,8 +189,8 @@ class WeChatVideoUploader:
         for folder in self.videos_dir.iterdir():
             if not folder.is_dir():
                 continue
-            # 尝试从文件夹名提取日期
-            date = self.extract_date_from_folder(folder.name)
+            # 【使用公共函数】从文件夹名提取日期
+            date = extract_date_from_folder(folder.name)
             has_date_in_name = date is not None
             
             # 如果没有提取到日期，使用config中的默认日期
@@ -193,7 +235,7 @@ class WeChatVideoUploader:
             """上传成功后的回调，在浏览器保持打开前执行文件处理"""
             video_path_str = str(video_path)
             # 云端下载的临时文件：清理删除
-            if "temp/notion_downloads" in video_path_str:
+            if "temp/" in video_path_str and ("notion_downloads" in video_path_str or "feishu_downloads" in video_path_str):
                 await self._cleanup_temp_files(video_path)
             # 本地文件（videos/）：保留不动，用户要求保留本地缓存
             elif "videos/" in video_path_str:
@@ -293,10 +335,10 @@ class WeChatVideoUploader:
     
     async def _cleanup_temp_files(self, video_path: str):
         """
-        清理云端模式的临时文件
+        清理混合模式的临时文件
         
         规范做法：
-        - 临时文件在上传成功后直接删除（源文件在 Notion 云端）
+        - 临时文件在上传成功后直接删除（源文件在 Notion/飞书）
         - 不保留在 temp 目录中占用空间
         
         Args:
@@ -305,8 +347,9 @@ class WeChatVideoUploader:
         try:
             video_path_obj = Path(video_path)
             
-            # 只清理 temp/notion_downloads 目录下的文件
-            if "temp/notion_downloads" not in str(video_path_obj):
+            # 只清理 temp/notion_downloads 或 temp/feishu_downloads 目录下的文件
+            path_str = str(video_path_obj)
+            if "temp/notion_downloads" not in path_str and "temp/feishu_downloads" not in path_str:
                 return
             
             # 删除视频文件
@@ -418,18 +461,22 @@ class WeChatVideoUploader:
         print(f"{'='*60}")
         return success_count > 0
 
-    async def upload_videos_from_source(self, videos: List[VideoInfo], publish_mode: str = '1') -> bool:
-        """从数据源上传视频（云端模式）"""
+    async def upload_videos_from_source(self, videos: List[VideoInfo], publish_mode: str = '1') -> dict:
+        """从数据源上传视频（混合模式）
+        
+        Returns:
+            dict: {'success': [成功视频列表], 'failed': [失败视频列表]}
+        """
         if not videos:
             print("未找到要上传的视频")
-            return False
+            return {'success': [], 'failed': []}
         
         # 登录微信视频号
         print("\n正在登录微信视频号...")
         try:
             if not await weixin_setup(self.account_file, handle=True):
                 print("❌ 登录失败，请检查账号配置")
-                return False
+                return {'success': [], 'failed': videos}
         except Exception as e:
             error_msg = str(e)
             if "TargetClosed" in error_msg or "browser has been closed" in error_msg:
@@ -438,16 +485,18 @@ class WeChatVideoUploader:
                 print("   如需重新登录，请删除 cookies 文件夹后重试")
             else:
                 print(f"\n❌ 登录失败: {e}")
-            return False
+            return {'success': [], 'failed': videos}
         
         # 上传每个视频
-        success_count = 0
+        success_videos = []
+        failed_videos = []
         
         async with async_playwright() as playwright:
             for idx, video in enumerate(videos):
                 # 【关键】使用每个视频自己的 publish_mode（如果有），否则使用传入的默认值
                 video_publish_mode = video.publish_mode if video.publish_mode else publish_mode
-                print(f"\n📤 正在上传: {video.name_for_match} (发布方式: {'定时发布' if video_publish_mode == '1' else '保存草稿'})")
+                publish_date_str = video.publish_date.strftime('%Y-%m-%d %H:%M') if video.publish_date else '未设置'
+                print(f"\n📤 正在上传: {video.name_for_match} (发布日期: {publish_date_str}, 方式: {'定时发布' if video_publish_mode == '1' else '保存草稿'})")
                 
                 # 组装视频数据
                 video_data = {
@@ -471,24 +520,28 @@ class WeChatVideoUploader:
                 )
                 
                 if success:
-                    success_count += 1
-                    # 云端模式：清理临时文件（最后一个视频通过回调清理）
+                    success_videos.append(video)
+                    # 混合模式：清理临时文件（最后一个视频通过回调清理）
                     # 本地文件保留不动
                     video_path_str = str(video.video_path)
-                    if not is_last_video and "temp/notion_downloads" in video_path_str:
+                    if not is_last_video and ("temp/notion_downloads" in video_path_str or "temp/feishu_downloads" in video_path_str):
                         await self._cleanup_temp_files(video.video_path)
                     elif "videos/" in video_path_str:
                         print(f"📁 本地视频保留: {video.name_for_match}")
+                else:
+                    failed_videos.append(video)
                 
                 # 如果不是最后一个视频，添加延迟
                 if not is_last_video:
                     await asyncio.sleep(5)
         
         # 上传完成统计
+        success_count = len(success_videos)
+        total_count = len(videos)
         print(f"\n{'='*60}")
-        print(f"上传完成！成功上传 {success_count}/{len(videos)} 个视频")
+        print(f"上传完成！成功上传 {success_count}/{total_count} 个视频")
         print(f"{'='*60}")
-        return success_count > 0
+        return {'success': success_videos, 'failed': failed_videos}
 
 
 async def main():
@@ -497,7 +550,7 @@ async def main():
     
     # ==================== 命令行参数解析 ====================
     parser = argparse.ArgumentParser(description='微信视频号批量上传工具')
-    parser.add_argument('--mode', choices=['local', 'notion', 'cloud'], help='数据源模式: local=本地模式, notion=Notion匹配模式, cloud=纯云端模式')
+    parser.add_argument('--mode', choices=['local', 'notion', 'feishu'], help='数据源模式: local=本地模式, notion=Notion混合模式, feishu=飞书混合模式')
     parser.add_argument('--publish', choices=['1', '2'], help='发布方式: 1=定时发布, 2=保存草稿')
     parser.add_argument('--no-interactive', action='store_true', help='非交互模式（使用默认值或命令行参数）')
     args = parser.parse_args()
@@ -540,51 +593,55 @@ async def main():
         config = load_config()
         
         if mode == 'local':
-            print("\n✅ 已选择：本地模式（命令行参数）")
+            mode_badge('本地模式')
             data_source = LocalDataSource(config)
         elif mode == 'notion':
-            print("\n✅ 已选择：Notion匹配模式（命令行参数）")
-            print("\n📁 将扫描 videos/ 文件夹中的视频，并从 Notion 获取标题/描述/标签")
+            mode_badge('Notion 混合模式', '本地视频 + Notion 元数据')
             
             # 优先从 config 读取，否则检查环境变量
             notion_token = config.get('notion_api_token', '').strip()
             if not notion_token:
                 notion_token = os.getenv('NOTION_API_TOKEN', '')
             if not notion_token:
-                print("\n❌ 非交互模式下需要设置 NOTION_API_TOKEN（环境变量或 config.json）")
+                error("非交互模式下需要设置 NOTION_API_TOKEN")
+                info("方式1: 在 config.json 中设置 'notion_api_token'")
+                info("方式2: 设置环境变量 NOTION_API_TOKEN")
                 return
             # 临时设置环境变量供 NotionDataSource 使用
             os.environ['NOTION_API_TOKEN'] = notion_token
             try:
                 data_source = NotionDataSource(config)
             except ValueError as e:
-                print(f"\n❌ Notion 初始化失败: {e}")
+                error(f"Notion 初始化失败: {e}")
                 return
-        elif mode == 'cloud':
-            print("\n☁️ 已选择：纯云端模式（命令行参数）")
-            print("\n☁️ 所有数据（包括视频文件）将从 Notion 云端获取")
+        elif mode == 'feishu':
+            mode_badge('飞书混合模式', '飞书多维表格')
             
-            # 云端模式只需要 Notion 配置
-            notion_token = config.get('notion_api_token', '').strip()
-            if not notion_token:
-                notion_token = os.getenv('NOTION_API_TOKEN', '')
-            if not notion_token:
-                print("\n❌ 云端模式需要设置 NOTION_API_TOKEN（环境变量或 config.json）")
+            # 飞书混合模式只需要飞书配置
+            feishu_app_id = config.get('feishu_app_id', '').strip()
+            feishu_app_secret = config.get('feishu_app_secret', '').strip()
+            feishu_bitable_token = config.get('feishu_bitable_token', '').strip()
+            
+            if not feishu_app_id or not feishu_app_secret:
+                error("飞书混合模式需要设置 feishu_app_id 和 feishu_app_secret")
                 return
             
-            # 临时设置环境变量
-            os.environ['NOTION_API_TOKEN'] = notion_token
+            if not feishu_bitable_token:
+                error("飞书混合模式需要设置 feishu_bitable_token")
+                return
             
-            # 云端模式：只需要 Notion 相关配置
-            cloud_config = {
-                'notion_database_id': config.get('notion_database_id', ''),
-                'notion_database_name': config.get('notion_database_name', '')
+            # 混合模式：只需要飞书相关配置
+            feishu_config = {
+                'feishu_app_id': feishu_app_id,
+                'feishu_app_secret': feishu_app_secret,
+                'feishu_bitable_token': feishu_bitable_token,
+                'feishu_table_id': config.get('feishu_table_id', '')
             }
             
             try:
-                data_source = NotionDataSource(cloud_config)
+                data_source = FeishuDataSource(feishu_config)
             except ValueError as e:
-                print(f"\n❌ 云端模式初始化失败: {e}")
+                error(f"飞书混合模式初始化失败: {e}")
                 return
     else:
         # ==================== 交互式菜单 ====================
@@ -593,13 +650,19 @@ async def main():
         print("="*60)
         print("\n请选择数据源：")
         print("1. 本地模式（从 videos/ 文件夹读取 txt 文件）")
-        print("2. 云端模式（从 Notion 数据库读取视频信息）")
+        print("2. Notion混合模式（从 Notion 数据库读取视频信息）")
+        print("3. 飞书混合模式（从 飞书多维表格读取视频信息）")
         print()
         
-        mode_input = input("请输入选项 (1/2): ").strip()
+        mode_input = input("请输入选项 (1/2/3): ").strip()
         
-        # 将 1/2 转换为 local/notion
-        mode = 'local' if mode_input == '1' else 'notion'
+        # 将 1/2/3 转换为 local/cloud/feishu
+        if mode_input == '1':
+            mode = 'local'
+        elif mode_input == '3':
+            mode = 'feishu'
+        else:
+            mode = 'notion'  # 默认Notion混合模式
         
         config = load_config()
         
@@ -608,9 +671,6 @@ async def main():
             data_source = LocalDataSource(config)
             
         elif mode == 'notion':
-            print("\n✅ 已选择：云端模式（Notion）")
-            print("\n📁 将扫描 videos/ 文件夹中的视频，并从 Notion 获取标题/描述/标签")
-            
             # 优先从 config.json 读取 token，其次环境变量
             notion_token = config.get('notion_api_token', '').strip()
             if not notion_token:
@@ -622,11 +682,35 @@ async def main():
                 print("方式2: 设置环境变量 NOTION_API_TOKEN")
                 print("示例: export NOTION_API_TOKEN='your_token_here'")
                 
-                choice = input("\n请选择：1. 切换到本地模式  2. 退出程序 : ").strip()
+                choice = input("\n请选择：1. 切换到本地模式  2. 切换到飞书模式  3. 退出程序 : ").strip()
                 if choice == "1":
                     print("\n✅ 已切换至：本地模式")
                     data_source = LocalDataSource(config)
                     mode = 'local'
+                elif choice == "2":
+                    print("\n✅ 已切换至：飞书混合模式")
+                    # 检查飞书配置
+                    feishu_app_id = config.get('feishu_app_id', '').strip()
+                    feishu_app_secret = config.get('feishu_app_secret', '').strip()
+                    feishu_bitable_token = config.get('feishu_bitable_token', '').strip()
+                    
+                    if not feishu_app_id or not feishu_app_secret or not feishu_bitable_token:
+                        print("⚠️ 飞书配置不完整，请在 config.json 中配置")
+                        return
+                    
+                    feishu_config = {
+                        'feishu_app_id': feishu_app_id,
+                        'feishu_app_secret': feishu_app_secret,
+                        'feishu_bitable_token': feishu_bitable_token,
+                        'feishu_table_id': config.get('feishu_table_id', '')
+                    }
+                    
+                    try:
+                        data_source = FeishuDataSource(feishu_config)
+                        mode = 'feishu'
+                    except ValueError as e:
+                        print(f"❌ 飞书初始化失败: {e}")
+                        return
                 else:
                     print("程序已退出")
                     return
@@ -702,45 +786,183 @@ async def main():
                     import traceback
                     traceback.print_exc()
         
-        # 云端模式（纯云端，不依赖本地视频文件）
-        elif mode == 'cloud':
+        # Notion混合模式（本地视频 + Notion元数据）
+        elif mode == 'notion':
             try:
-                print("\n☁️【云端模式】正在从 Notion 获取视频数据...")
+                print("\n[Notion 混合模式] 扫描本地视频并匹配 Notion 元数据...")
                 
-                # 从数据源获取云端视频列表（只获取状态为"待发布"的）
-                if hasattr(data_source, 'get_videos_from_cloud'):
-                    videos = data_source.get_videos_from_cloud(status_filter="待发布")
-                else:
-                    print("❌ 数据源不支持云端模式")
-                    return
+                # 获取带元数据的视频列表
+                videos = data_source.get_videos()
                 
                 if not videos:
-                    print("❌ 云端模式下未找到可上传的视频！")
+                    print("❌ 未找到可上传的视频！")
                     print("\n请检查：")
-                    print("1. Notion 数据库中是否有视频记录")
-                    print("2. 视频记录是否包含「视频文件」字段")
+                    print("1. videos/ 文件夹中是否有视频文件")
+                    print("2. Notion 中是否有对应的视频记录（状态为「待发布」）")
+                    print("3. 视频文件名是否与 Notion 记录匹配")
                     return
                 
-                print(f"\n☁️ 找到 {len(videos)} 个云端视频")
-                for v in videos:
-                    print(f"  - {v.name_for_match}")
+                # 【修复】视频列表已在 notion_data_source.py 中输出，此处不再重复显示
                 
-                # 【云端模式特有】下载所有视频文件
-                print("\n⬇️【云端模式】正在下载视频文件...")
-                try:
-                    downloaded_videos = await data_source.download_video_files(videos)
-                    print(f"✅ 成功下载 {len(downloaded_videos)}/{len(videos)} 个视频")
+                # 交互模式下询问发布方式
+                publish_choice = args.publish
+                if not args.no_interactive and not args.publish:
+                    print("\n请选择发布方式：")
+                    print("1. 定时发布")
+                    print("2. 保存草稿")
+                    print("3. 取消")
                     
-                    if not downloaded_videos:
-                        print("❌ 没有成功下载的视频，上传取消")
+                    choice = input("\n请输入选项 (1/2/3): ").strip()
+                    
+                    if choice == '3':
+                        print("上传已取消")
                         return
+                    elif choice not in ['1', '2']:
+                        print("无效选项，默认使用定时发布")
+                        publish_choice = '1'
+                    else:
+                        publish_choice = choice
+                
+                if not publish_choice:
+                    publish_choice = '1'  # 默认定时发布
+                
+                # 创建上传器并执行上传
+                uploader = WeChatVideoUploader(account_file, data_source=None)
+                
+                # 使用upload_videos_from_source方法上传所有视频
+                result = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
+                
+                # 更新发布状态（使用公共函数）
+                update_videos_publish_status(data_source, result, "Notion")
                     
-                    # 使用下载后的视频列表上传
-                    videos = downloaded_videos
-                    
-                except Exception as e:
-                    print(f"❌ 下载视频文件失败: {e}")
+            except Exception as e:
+                if "TargetClosed" in str(e) or "browser has been closed" in str(e):
+                    print("\n❌ 登录窗口被关闭或扫码超时")
+                    print("💡 提示：扫码登录时请勿关闭浏览器窗口")
+                elif isinstance(e, KeyboardInterrupt):
+                    print("\n⚠️ 用户中断了操作")
+                else:
+                    print(f"\n❌ Notion混合模式执行失败: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                return
+        
+        # 飞书混合模式
+        elif mode == 'feishu':
+            try:
+                # 获取视频列表（飞书混合模式）
+                videos = data_source.get_videos()
+                
+                if not videos:
+                    print("\n❌ 未找到可上传的视频！")
+                    print("\n请检查：")
+                    print("1. videos/ 文件夹中是否有视频文件")
+                    print("2. 飞书多维表格中是否有对应的视频记录（状态为「待发布」）")
+                    print("3. 视频文件名是否与飞书记录的 Name 字段匹配")
                     return
+                
+                # 【关键】下载需要云端下载的视频
+                need_download = any(v.video_url and not v.video_path for v in videos)
+                if need_download:
+                    print("\n⬇️【飞书混合模式下载】正在下载视频文件...")
+                    try:
+                        processed_videos = await data_source.download_video_files(videos)
+                        # 统计本地和下载
+                        local_count = sum(1 for v in processed_videos if "videos/" in str(v.video_path))
+                        cloud_count = len(processed_videos) - local_count
+                        print(f"✅ 处理完成: {local_count} 个本地视频, {cloud_count} 个云端下载 (共 {len(processed_videos)} 个视频)")
+                        
+                        if not processed_videos:
+                            print("❌ 没有成功处理的视频，上传取消")
+                            return
+                        
+                        videos = processed_videos
+                    except Exception as e:
+                        print(f"❌ 处理视频文件失败: {e}")
+                        return
+                else:
+                    print("\n📁 所有视频已在本地，无需下载")
+                
+                # 交互模式下询问发布方式
+                publish_choice = args.publish
+                if not args.no_interactive and not args.publish:
+                    print("\n请选择发布方式：")
+                    print("1. 定时发布")
+                    print("2. 保存草稿")
+                    print("3. 取消")
+                    
+                    choice = input("\n请输入选项 (1/2/3): ").strip()
+                    
+                    if choice == '3':
+                        print("上传已取消")
+                        return
+                    elif choice not in ['1', '2']:
+                        print("无效选项，默认使用定时发布")
+                        publish_choice = '1'
+                    else:
+                        publish_choice = choice
+                
+                if not publish_choice:
+                    publish_choice = '1'  # 默认定时发布
+                
+                # 创建上传器并执行上传
+                uploader = WeChatVideoUploader(account_file, data_source=data_source)
+                
+                # 上传视频并更新状态
+                result = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
+                
+                # 更新发布状态
+                update_videos_publish_status(data_source, result, "飞书")
+                    
+            except Exception as e:
+                if "TargetClosed" in str(e) or "browser has been closed" in str(e):
+                    print("\n❌ 登录窗口被关闭或扫码超时")
+                    print("💡 提示：扫码登录时请勿关闭浏览器窗口")
+                    print("   如需重新登录，请删除 cookies 文件夹后重试")
+                elif isinstance(e, KeyboardInterrupt):
+                    print("\n⚠️ 用户中断了操作")
+                else:
+                    print(f"\n❌ 飞书混合模式执行失败: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                return
+        
+        # Notion匹配模式（本地视频 + Notion元数据）
+        elif mode == 'notion':
+            try:
+                
+                # 从Notion获取视频列表（匹配模式）
+                videos = data_source.get_videos()
+                
+                if not videos:
+                    print("❌ 未找到可上传的视频！")
+                    print("\n请检查：")
+                    print("1. videos/ 文件夹中是否有视频文件")
+                    print("2. Notion 数据库中是否有对应的视频记录")
+                    print("3. 视频文件名是否与Notion记录匹配")
+                    return
+                
+                # 【关键】下载需要云端下载的视频
+                need_download = any(v.video_url and not v.video_path for v in videos)
+                if need_download:
+                    print("\n⬇️【Notion混合模式下载】正在下载视频文件...")
+                    try:
+                        processed_videos = await data_source.download_video_files(videos)
+                        # 统计本地和下载
+                        local_count = sum(1 for v in processed_videos if "videos/" in str(v.video_path))
+                        cloud_count = len(processed_videos) - local_count
+                        print(f"✅ 处理完成: {local_count} 个本地视频, {cloud_count} 个云端下载 (共 {len(processed_videos)} 个视频)")
+                        
+                        if not processed_videos:
+                            print("❌ 没有成功处理的视频，上传取消")
+                            return
+                        
+                        videos = processed_videos
+                    except Exception as e:
+                        print(f"❌ 处理视频文件失败: {e}")
+                        return
+                else:
+                    print("\n📁 所有视频已在本地，无需下载")
                 
                 # 交互模式下询问发布方式
                 if not args.no_interactive and not args.publish:
@@ -763,51 +985,50 @@ async def main():
                 if not publish_choice:
                     publish_choice = '1'  # 默认定时发布
                 
-                # 创建上传器并执行云端模式上传
-                # 云端模式不需要本地数据源的额外配置
+                # 创建上传器并执行上传
                 uploader = WeChatVideoUploader(account_file, data_source=None)
                 
-                # 使用upload_videos_from_source方法上传所有视频
-                # 此方法内部会为每个视频使用自己的publish_mode
-                success = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
+                # 转换为VideoInfo列表
+                result = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
                 
-                # 更新Notion状态（成功和失败的分别标记）
-                print("\n📝 正在更新Notion状态...")
+                # 更新发布状态（根据实际上传结果）
+                print("\n📝 正在更新发布状态...")
                 success_count = 0
                 fail_count = 0
-                for video in videos:
+                
+                # 标记成功的视频
+                for video in result.get('success', []):
                     if video.notion_page_id:
-                        # 检查视频是否下载成功（有本地路径表示至少下载成功）
-                        if video.video_path and Path(video.video_path).exists():
-                            # 视频下载成功，标记为已发布
-                            if data_source.update_video_status(video.notion_page_id, "已发布"):
-                                print(f"  ✅ {video.name_for_match} -> 已发布")
-                                success_count += 1
-                            else:
-                                print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
-                                fail_count += 1
+                        status_updated = data_source.update_video_status(video.notion_page_id, "已发布")
+                        if status_updated:
+                            print(f"  ✅ {video.name_for_match} -> 已发布")
+                            success_count += 1
                         else:
-                            # 视频下载或上传失败
-                            if data_source.update_video_status(video.notion_page_id, "发布失败"):
-                                print(f"  ❌ {video.name_for_match} -> 发布失败")
-                                fail_count += 1
-                            else:
-                                print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
+                            print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
+                
+                # 标记失败的视频
+                for video in result.get('failed', []):
+                    if video.notion_page_id:
+                        status_updated = data_source.update_video_status(video.notion_page_id, "发布失败")
+                        if status_updated:
+                            print(f"  ❌ {video.name_for_match} -> 发布失败")
+                            fail_count += 1
+                        else:
+                            print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
                 
                 if success_count > 0:
-                    print(f"\n✅ 成功上传 {success_count} 个视频")
+                    print(f"\n✅ 成功上传并标记 {success_count} 个视频")
                 if fail_count > 0:
-                    print(f"\n❌ {fail_count} 个视频上传失败，已标记为'发布失败'")
+                    print(f"\n❌ {fail_count} 个视频上传失败")
                     
             except Exception as e:
                 if "TargetClosed" in str(e) or "browser has been closed" in str(e):
                     print("\n❌ 登录窗口被关闭或扫码超时")
                     print("💡 提示：扫码登录时请勿关闭浏览器窗口")
-                    print("   如需重新登录，请删除 cookies 文件夹后重试")
                 elif isinstance(e, KeyboardInterrupt):
                     print("\n⚠️ 用户中断了操作")
                 else:
-                    print(f"\n❌ 云端模式执行失败: {str(e)}")
+                    print(f"\n❌ Notion模式执行失败: {str(e)}")
                     import traceback
                     traceback.print_exc()
                 return

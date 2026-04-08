@@ -12,3 +12,4 @@ fastapi
 uvicorn[standard]
 python-multipart
 pydantic
+lark-oapi>=1.0.0

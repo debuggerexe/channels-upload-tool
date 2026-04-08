@@ -1,6 +1,6 @@
 """
-Notion 云端数据源实现
-直接从 Notion API 获取视频信息和文件，支持完全云端模式
+Notion 数据源实现
+从 Notion API 获取视频元数据，支持混合模式（优先本地，无本地则从云端下载）
 """
 
 import os
@@ -19,35 +19,28 @@ from utils.match_utils import (
     remove_date_prefix,
     calculate_similarity,
     select_best_matching_video,
-    find_best_match_in_list
+    find_best_match_in_list,
+    match_local_video,
+    match_local_cover
 )
-
-
-def sanitize_short_title(title: str) -> str:
-    """
-    清理短标题，只保留中文字符
-    
-    处理流程：
-    1. 过滤：只保留中文字符（去掉英文、数字、符号）
-    2. 填充：不足6字用空格补充到6字
-    3. 截断：超过16字强行截断到16字
-    """
-    if not title:
-        return "      "  # 6个空格
-    
-    # 步骤1：只保留中文字符
-    chinese_only = re.sub(r'[^\u4e00-\u9fa5]', '', title)
-    
-    # 步骤2：不足6字用空格补充
-    if len(chinese_only) < 6:
-        chinese_only = chinese_only + ' ' * (6 - len(chinese_only))
-    
-    # 步骤3：超过16字强行截断（直接截取前16字，不保留完整词义）
-    if len(chinese_only) > 16:
-        chinese_only = chinese_only[:16]
-    
-    return chinese_only
-
+from utils.text_utils import (
+    assemble_description,
+    sanitize_short_title,
+    parse_publish_date,
+    calculate_publish_mode,
+    parse_collections
+)
+from utils.output_utils import (
+    print_data_source_header,
+    print_records_returned,
+    print_pending_videos,
+    print_pending_video_item,
+    print_skipped_non_pending,
+    print_no_videos_warning,
+    print_scan_local_videos,
+    print_match_summary,
+    print_final_video_summary
+)
 
 class NotionDataSource(VideoDataSource):
     """Notion 云端数据源"""
@@ -57,6 +50,7 @@ class NotionDataSource(VideoDataSource):
     NOTION_API_BASE = "https://api.notion.com/v1"
     
     def __init__(self, config: Optional[dict] = None):
+        super().__init__()  # 调用基类__init__设置temp_dir
         self.api_token = os.getenv("NOTION_API_TOKEN")
         if not self.api_token:
             raise ValueError("请设置环境变量 NOTION_API_TOKEN")
@@ -67,17 +61,12 @@ class NotionDataSource(VideoDataSource):
             "Notion-Version": "2022-06-28"
         }
         self.videos_dir = Path(BASE_DIR) / "videos"
-        
-        # 从配置获取默认发布时间
         self.config = config or {}
-        publish_times = self.config.get('publish_times', ['09:00'])
-        if publish_times and ':' in publish_times[0]:
-            time_parts = publish_times[0].split(':')
-            self.default_hour = int(time_parts[0])
-            self.default_minute = int(time_parts[1])
-        else:
-            self.default_hour = 9
-            self.default_minute = 0
+        
+        # 【简化】使用固定的默认发布时间 09:00，不再从本地配置读取
+        # 混合模式下，发布时间应完全从 Notion/飞书 获取
+        self.default_hour = 9
+        self.default_minute = 0
         
         # 从配置获取数据库ID或名称
         self.database_id = self._get_database_id_from_config()
@@ -205,82 +194,6 @@ class NotionDataSource(VideoDataSource):
         
         return description.strip(), ""
     
-    def _match_local_video(self, title: str) -> Optional[Path]:
-        """
-        根据标题匹配本地视频文件
-        
-        匹配策略（按优先级）：
-        1. 直接匹配：Cover 字段完全包含在文件夹名中
-        2. 去除前缀匹配：去除常见日期前缀（YYMMDD, MMDD等）后匹配
-        3. 模糊匹配：使用相似度匹配
-        """
-        if not self.videos_dir.exists():
-            return None
-        
-        if not title:
-            return None
-        
-        # 清理标题（去除前后空格）
-        clean_title = title.strip()
-        
-        candidates = []  # (匹配得分, folder, video_path)
-        
-        for folder in self.videos_dir.iterdir():
-            if not folder.is_dir():
-                continue
-            
-            folder_name = folder.name.strip()
-            
-            # 获取视频文件
-            video_files = list(folder.glob("*.mp4"))
-            if not video_files:
-                continue
-            video_file = video_files[0]
-            
-            # 策略1：直接包含匹配（完全匹配或部分匹配）
-            if clean_title in folder_name:
-                # 完全匹配得分最高
-                score = 100 if folder_name == clean_title else 90
-                candidates.append((score, folder, video_file))
-                continue
-            
-            # 策略2：去除常见前缀后匹配
-            # 匹配模式：YYMMDD + 标题 或 MMDD + 标题 或 DD + 标题
-            clean_folder = remove_date_prefix(folder_name)
-            
-            if clean_title in clean_folder or clean_folder in clean_title:
-                score = 80
-                candidates.append((score, folder, video_file))
-                continue
-            
-            # 策略3：模糊匹配（计算相似度）
-            similarity = calculate_similarity(clean_title, clean_folder)
-            if similarity > 0.6:  # 60% 相似度阈值
-                score = int(similarity * 70)  # 最高70分
-                candidates.append((score, folder, video_file))
-        
-        # 按得分排序，返回得分最高的
-        if candidates:
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            best_match = candidates[0]
-            print(f"✅ 匹配成功: '{title}' -> 文件夹 '{best_match[1].name}' (得分: {best_match[0]})")
-            return best_match[2]
-        
-        print(f"📥 本地未找到 '{title}'，将从云端下载")
-        return None
-    
-    def _match_local_cover(self, video_path: Path) -> Optional[str]:
-        """匹配本地封面图"""
-        folder = video_path.parent
-        cover_extensions = ['.jpg', '.jpeg', '.png', '.webp']
-        
-        for ext in cover_extensions:
-            cover_files = list(folder.glob(f"*{ext}"))
-            if cover_files:
-                return str(cover_files[0])
-        
-        return None
-    
     def _extract_property(self, page: dict, property_name: str) -> any:
         """从页面属性中提取值（支持所有Notion字段类型）"""
         properties = page.get("properties", {})
@@ -332,183 +245,24 @@ class NotionDataSource(VideoDataSource):
         
         return None
     
-    async def _download_file_async(self, file_url: str, filename: str, progress_callback=None, max_retries: int = 3) -> str:
+    def get_videos_hybrid(self, date_range: Optional[Tuple[date, date]] = None, download_files: bool = False, status_filter: str = "待发布") -> List[VideoInfo]:
         """
-        从 URL 异步下载文件到临时目录（带重试机制）
-        
-        Args:
-            file_url: 文件下载链接
-            filename: 保存的文件名
-            progress_callback: 可选的进度回调函数
-            max_retries: 最大重试次数
-            
-        Returns:
-            本地临时文件路径
-        """
-        temp_dir = Path(BASE_DIR) / "temp" / "notion_downloads"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        
-        local_path = temp_dir / filename
-        
-        # 重试循环
-        for attempt in range(1, max_retries + 1):
-            print(f"⬇️ 开始下载: {filename} (尝试 {attempt}/{max_retries})")
-            
-            try:
-                async with aiohttp.ClientSession() as session:
-                    # Notion 文件需要特殊的请求头
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                        'Accept': '*/*',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'Connection': 'keep-alive'
-                    }
-                    
-                    async with session.get(file_url, headers=headers, timeout=aiohttp.ClientTimeout(total=300)) as response:
-                        if response.status != 200:
-                            error_text = await response.text()
-                            print(f"   ❌ HTTP {response.status}: {error_text[:200]}")
-                            raise Exception(f"下载失败，HTTP {response.status}")
-                        
-                        total_size = int(response.headers.get('content-length', 0))
-                        downloaded = 0
-                        
-                        with open(local_path, 'wb') as f:
-                            async for chunk in response.content.iter_chunked(8192):
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                if progress_callback and total_size > 0:
-                                    progress = int((downloaded / total_size) * 100)
-                                    progress_callback(filename, progress)
-                
-                # 验证文件大小
-                if local_path.exists() and local_path.stat().st_size > 0:
-                    print(f"✅ 下载完成: {local_path} ({local_path.stat().st_size / 1024 / 1024:.2f} MB)")
-                    return str(local_path)
-                else:
-                    raise Exception("下载文件为空")
-                    
-            except Exception as e:
-                print(f"❌ 下载失败 {filename} (尝试 {attempt}/{max_retries}): {e}")
-                # 清理失败的文件
-                if local_path.exists():
-                    local_path.unlink()
-                
-                if attempt < max_retries:
-                    # 等待后重试（指数退避）
-                    wait_time = 2 ** attempt
-                    print(f"   ⏳ {wait_time}秒后重试...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    # 所有重试都失败
-                    raise Exception(f"下载失败，已重试{max_retries}次: {e}")
-        
-        raise Exception("下载失败，超出最大重试次数")
-    async def download_video_files(self, videos: List[VideoInfo], progress_callback=None) -> List[VideoInfo]:
-        """
-        批量下载云端视频文件到本地临时目录
-        【混合模式】优先使用本地 videos/ 文件夹中的文件，没有则从云端下载
-        
-        Args:
-            videos: VideoInfo 列表（包含 video_url 和 cover_url）
-            progress_callback: 可选的进度回调函数
-            
-        Returns:
-            更新后的 VideoInfo 列表（填充了 video_path 和 cover_path）
-        """
-        async def download_single_video(video: VideoInfo) -> VideoInfo:
-            try:
-                # 【本地优先】先检查 videos/ 文件夹是否有匹配的文件
-                local_video_path = self._match_local_video(video.name_for_match)
-                local_cover_path = None
-                
-                if local_video_path:
-                    # 找到本地视频，直接使用
-                    video.video_path = str(local_video_path)
-                    print(f"📁 使用本地视频: {local_video_path.name}")
-                    
-                    # 同时检查本地封面
-                    local_cover_path = self._match_local_cover(local_video_path)
-                    if local_cover_path:
-                        video.cover_path = str(local_cover_path)
-                        print(f"📁 使用本地封面: {Path(local_cover_path).name}")
-                else:
-                    # 本地没有，从云端下载视频
-                    if video.video_url:
-                        video_filename = f"{video.name_for_match or 'video'}_{video.publish_date.strftime('%Y%m%d')}.mp4"
-                        video.temp_local_video_path = await self._download_file_async(
-                            video.video_url, 
-                            video_filename,
-                            progress_callback,
-                            max_retries=3
-                        )
-                        # 更新 video_path 为下载后的本地路径
-                        video.video_path = video.temp_local_video_path
-                
-                # 如果本地没有封面，尝试从云端下载
-                if not video.cover_path and video.cover_url:
-                    try:
-                        # 从URL中提取纯文件名，去掉查询参数
-                        from urllib.parse import urlparse
-                        parsed_url = urlparse(video.cover_url)
-                        cover_name = Path(parsed_url.path).stem or 'cover'
-                        cover_ext = Path(parsed_url.path).suffix or '.jpg'
-                        cover_filename = f"{video.name_for_match or 'cover'}_{video.publish_date.strftime('%Y%m%d')}{cover_ext}"
-                        video.temp_local_cover_path = await self._download_file_async(
-                            video.cover_url,
-                            cover_filename,
-                            progress_callback,
-                            max_retries=2  # 封面下载重试次数较少
-                        )
-                        # 更新 cover_path 为下载后的本地路径
-                        video.cover_path = video.temp_local_cover_path
-                    except Exception as cover_error:
-                        # 封面下载失败不影响视频上传
-                        print(f"⚠️ 封面下载失败（将使用视频默认封面）: {cover_error}")
-                        video.cover_url = None  # 清空封面URL，使用视频默认封面
-                
-                return video
-                
-            except Exception as e:
-                print(f"❌ 处理失败 {video.name_for_match}: {e}")
-                raise
-        
-        # 并发处理所有视频
-        tasks = [download_single_video(v) for v in videos]
-        processed_videos = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 过滤掉失败的
-        successful_videos = []
-        for v in processed_videos:
-            if isinstance(v, Exception):
-                print(f"⚠️ 跳过失败的视频")
-                continue
-            successful_videos.append(v)
-        
-        # 统计本地和云端
-        local_count = sum(1 for v in successful_videos if "videos/" in str(v.video_path))
-        cloud_count = len(successful_videos) - local_count
-        print(f"✅ 处理完成: {local_count} 个本地视频, {cloud_count} 个云端下载")
-        return successful_videos
-    
-    def get_videos_from_cloud(self, date_range: Optional[Tuple[date, date]] = None, download_files: bool = False, status_filter: str = "待发布") -> List[VideoInfo]:
-        """
-        【完全云端模式】直接从 Notion 获取视频信息和文件
+        【混合模式】从 Notion 获取视频信息和文件
         
         此模式下：
         1. 从 Notion 数据库读取所有视频元数据
-        2. 从 Notion 的「视频文件」和「封面图片」字段获取文件
-        3. 不依赖本地 videos/ 文件夹
-        4. 配置项（原创声明、封面裁剪）全部从 Notion 读取
+        2. 优先匹配本地 videos/ 文件夹中的视频文件
+        3. 本地没有时，从 Notion「视频」字段获取URL，待下载
         
         Args:
-            date_range: 可选的日期范围
-            download_files: 是否立即下载文件到本地临时目录
+            date_range: 可选的日期范围筛选
+            download_files: 是否立即下载文件（异步下载）
+            status_filter: 状态筛选（默认"待发布"）
             
         Returns:
             VideoInfo 列表，包含视频元数据和云端文件 URL
         """
-        print("☁️【云端模式】正在从 Notion 获取视频信息...")
+        print("☁️【混合模式】正在从 Notion 获取视频信息...")
         
         # 构建查询过滤器（如果有日期范围）
         filter_obj = None
@@ -523,7 +277,7 @@ class NotionDataSource(VideoDataSource):
         
         # 查询 Notion 数据库
         pages = self._query_database(filter_obj)
-        print(f"📡 Notion API 返回 {len(pages)} 条原始记录")
+        print(f"  • Notion 返回 {len(pages)} 条记录")
         
         videos = []
         for page in pages:
@@ -548,7 +302,7 @@ class NotionDataSource(VideoDataSource):
                 
                 # 【发布方式】从 Notion 读取并计算优先级
                 publish_mode_notion = self._extract_property(page, "发布方式")
-                publish_mode = self._calculate_publish_mode(publish_mode_notion, date_str)
+                publish_mode = calculate_publish_mode(publish_mode_notion, bool(date_str))
                 
                 # 【云端文件】从 Notion 读取视频文件和封面图片
                 video_files = self._extract_property(page, "视频") or []
@@ -582,48 +336,13 @@ class NotionDataSource(VideoDataSource):
                 # 清理短标题
                 final_short_title = sanitize_short_title(short_title if short_title else "")
                 
-                # 【云端模式】组装描述
-                description_parts = []
-                if title:
-                    description_parts.append(title)
-                
-                # 转换标签格式：逗号分隔 -> #开头
-                formatted_tags = ""
-                if tags:
-                    tag_list = [t.strip() for t in tags.replace('，', ',').split(',') if t.strip()]
-                    formatted_tags = ' '.join([f"#{tag}" for tag in tag_list])
-                
-                # 添加描述（如果有）
-                if description:
-                    description_parts.append(description)
-                    
-                    # 【修复】检查描述中是否已有标签行（以#开头的行）
-                    has_tag_in_desc = any(line.strip().startswith('#') for line in description.strip().split('\n'))
-                    if has_tag_in_desc:
-                        # 描述中已包含标签行，不再追加标签字段
-                        print(f"📝 描述已包含标签，跳过追加")
-                    elif formatted_tags:
-                        # 描述中没有标签行，且有标签字段，追加格式化后的标签
-                        description_parts.append(formatted_tags)
-                        print(f"📝 已追加标签到描述: {formatted_tags}")
-                elif formatted_tags:
-                    # 没有描述但有标签，只添加标签
-                    description_parts.append(formatted_tags)
-                    print(f"📝 已添加标签: {formatted_tags}")
-                
-                full_description = '\n'.join(description_parts)
+                # 【云端模式】使用公共函数组装描述
+                full_description = assemble_description(title, description, tags, verbose=False)
                 
                 # 解析日期和时间
-                try:
-                    if 'T' in date_str:
-                        publish_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    else:
-                        date_part = datetime.fromisoformat(date_str)
-                        publish_date = date_part.replace(hour=self.default_hour, minute=self.default_minute)
-                    if publish_date.tzinfo is not None:
-                        publish_date = publish_date.replace(tzinfo=None)
-                except Exception as e:
-                    print(f"⚠️ 日期解析失败 '{date_str}'，跳过: {e}")
+                publish_date = parse_publish_date(date_str, self.default_hour, self.default_minute)
+                if not publish_date:
+                    print(f"⚠️ 日期解析失败 '{date_str}'，跳过")
                     continue
                 
                 # 获取视频文件 URL
@@ -663,7 +382,7 @@ class NotionDataSource(VideoDataSource):
                 print(f"⚠️ 处理 Notion 记录时出错: {e}")
                 continue
         
-        print(f"\n☁️ 云端模式共找到 {len(videos)} 个【待发布/发布失败】状态的视频")
+        print(f"\n☁️ Notion混合模式共找到 {len(videos)} 个【待发布/发布失败】状态的视频")
         
         # 按日期排序
         videos.sort(key=lambda x: x.publish_date, reverse=False)
@@ -675,10 +394,23 @@ class NotionDataSource(VideoDataSource):
         return videos
     
     def get_videos(self, date_range: Optional[Tuple[date, date]] = None) -> List[VideoInfo]:
-        
-        # 首先获取所有 Notion 记录（用于本地视频匹配）
-        print("📡 正在从 Notion 获取视频信息...")
-        
+        """
+        【Notion混合模式】优先本地视频，无本地则从Notion云端下载
+
+        此模式下：
+        1. 从 Notion 获取视频元数据（只获取待发布/发布失败的）
+        2. 优先匹配本地 videos/ 文件夹中的视频
+        3. 本地没有时，从 Notion「视频」字段获取URL，待下载
+
+        Args:
+            date_range: 可选的日期范围筛选
+
+        Returns:
+            VideoInfo 列表，包含本地路径或云端URL
+        """
+        # ========== 第一步：从 Notion 获取所有记录并筛选 ==========
+        print_data_source_header("Notion")
+
         # 构建查询过滤器（如果有日期范围）
         filter_obj = None
         if date_range:
@@ -689,184 +421,164 @@ class NotionDataSource(VideoDataSource):
                     {"property": "发布日期", "date": {"on_or_before": end_date.isoformat()}}
                 ]
             }
-        
+
         # 查询 Notion 数据库
-        pages = self._query_database(filter_obj)
-        
-        print(f"📡 Notion API 返回 {len(pages)} 条原始记录")
-        if pages:
-            first_props = pages[0].get('properties', {})
-            print(f"📄 第一条记录 properties 列表: {list(first_props.keys())}")
-            # 查找 title 类型的属性
-            for prop_name, prop_data in first_props.items():
-                prop_type = prop_data.get('type', 'unknown')
-                if prop_type == 'title':
-                    title_items = prop_data.get('title', [])
-                    title_text = ''.join([item.get('plain_text', '') for item in title_items])
-                    print(f"   ⭐ {prop_name}: type={prop_type} → value='{title_text}'")
-            # 打印所有 Name 提取结果
-            for page in pages[:3]:
-                props = page.get('properties', {})
-                for prop_name, prop_data in props.items():
-                    if prop_data.get('type') == 'title':
-                        title_items = prop_data.get('title', [])
-                        title_text = ''.join([item.get('plain_text', '') for item in title_items])
-                        print(f"   📄 提取的 title: '{title_text}' (字段: {prop_name})")
-        
-        # 建立 Notion 记录索引（以 Name 字段为 key，用于匹配视频文件）
-        notion_records = {}
-        for page in pages:
-            name_for_match = self._extract_property(page, "Name")
-            if name_for_match:
-                notion_records[name_for_match.strip()] = page
-        
-        print(f"📚 Notion 中共有 {len(notion_records)} 条视频记录")
-        print(f"📋 Notion Name 列表: {list(notion_records.keys())}")
-        
-        # 扫描本地视频（两种方式）
-        videos = []
+        all_pages = self._query_database(filter_obj)
+        print_records_returned(len(all_pages))
+
+        # 按状态筛选：只保留"待发布"和"发布失败"
+        pending_pages = []
+        skipped_records = []
+        for page in all_pages:
+            name = self._extract_property(page, "Name") or "未知"
+            status = self._extract_property(page, "发布状态")
+            date_str = self._extract_property(page, "发布日期")
+
+            if status in ["待发布", "发布失败"]:
+                pending_pages.append(page)
+            else:
+                skipped_records.append((name, status or "无状态"))
+
+        # 【修复】按发布日期排序待上传视频
+        from datetime import datetime
+        def get_page_date(page):
+            date_str = self._extract_property(page, "发布日期") or ""
+            if date_str:
+                try:
+                    # 解析ISO格式日期，去除时区信息
+                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    if dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    return dt
+                except Exception:
+                    pass
+            return datetime.max  # 无日期的排最后
+        pending_pages.sort(key=get_page_date)
+
+        # 显示待上传视频列表
+        print_pending_videos(len(pending_pages), "Notion")
+        for page in pending_pages:
+            name = self._extract_property(page, "Name") or "未知"
+            status = self._extract_property(page, "发布状态") or "无状态"
+            date_str = self._extract_property(page, "发布日期") or "无日期"
+            print_pending_video_item(name, status, date_str)
+
+        if skipped_records:
+            print_skipped_non_pending(len(skipped_records))
+
+        if not pending_pages:
+            print_no_videos_warning()
+            return []
+
+        # ========== 第二步：扫描本地视频 ==========
         video_items = self._scan_videos()
-        print(f"📁 本地 videos/ 中找到 {len(video_items)} 个视频")
-        
+        print_scan_local_videos(len(video_items))
+
+        # 建立本地视频索引
+        local_videos = {}
         for video_file, container_name in video_items:
-            # 在 Notion 中查找匹配的记录
-            clean_title = remove_date_prefix(container_name)
-            
-            if not clean_title:
-                print(f"⚠️ 无法解析标题: {container_name}")
-                continue
-            
-            # 在 Notion 中查找匹配的记录
-            notion_page = self._find_notion_record(clean_title, notion_records)
-            
-            if not notion_page:
-                print(f"⚠️ Notion 中未找到匹配记录: '{clean_title}' (文件: {container_name})")
-                continue
-            
-            # 提取 Notion 中的信息（新字段映射）
-            # Name: 用于匹配本地视频文件名（Title 字段）
-            # 短标题: 视频号短标题（16字以内）
-            name_for_match = self._extract_property(notion_page, "Name")  # 用于匹配本地视频
-            short_title = self._extract_property(notion_page, "短标题")  # 视频号短标题
-            title = self._extract_property(notion_page, "标题")  # 视频号主标题
-            description = self._extract_property(notion_page, "描述")  # 视频描述区内容
-            tags = self._extract_property(notion_page, "标签")  # 话题标签
-            collections_str = self._extract_property(notion_page, "合集")  # 合集名称
-            date_str = self._extract_property(notion_page, "发布日期")
-            cover_position = self._extract_property(notion_page, "封面调整") or "middle"  # select类型，默认middle
-            original_declaration = self._extract_property(notion_page, "声明原创")  # checkbox类型
-            location = self._extract_property(notion_page, "位置") or "平台默认"  # 位置设置
-            
-            # 使用 Name 字段进行匹配验证
-            if not name_for_match:
-                print(f"⚠️ Notion 记录缺少 Name 字段，跳过: '{clean_title}'")
-                continue
-            
-            # 检查 发布日期 字段是否为空
-            if not date_str:
-                print(f"⚠️ Notion 记录缺少 发布日期 字段，跳过: '{clean_title}' (文件: {container_name})")
-                print(f"   请在 Notion 中为该视频填写发布日期")
-                continue
-            
-            # 处理合集名称列表（支持 multi_select）
-            collections = []
-            if collections_str:
-                collections = [c.strip() for c in collections_str.split(",") if c.strip()]
-            
-            # 清理短标题（16字以内）
-            final_short_title = sanitize_short_title(short_title if short_title else "")
-            
-            # 如果截断了，打印提示
-            original = short_title if short_title else title
-            if original and len(re.sub(r'[^\u4e00-\u9fa5]', '', original)) > 16:
-                print(f"⚠️ 短标题超过16字已截断: '{original}' → '{final_short_title}'")
-            
-            # 视频号描述区逻辑：
-            # 格式：标题 + 换行 + 描述 + 换行 + 标签（转换为 #开头格式）
-            # 1. 如果描述中已包含以 # 开头的标签行，不再追加标签字段
-            # 2. 如果描述中没有标签行，且标签字段存在，将标签追加到描述后面
-            description_parts = []
-            
-            # 0. 添加标题（如果有）
-            if title:
-                description_parts.append(title)
-                print(f"📝 已添加标题到描述区: {title}")
-            
-            # 转换标签格式：逗号分隔 -> #开头
-            formatted_tags = ""
-            if tags:
-                # 处理逗号分隔的标签（支持中英文逗号）
-                tag_list = [t.strip() for t in tags.replace('，', ',').split(',') if t.strip()]
-                formatted_tags = ' '.join([f"#{tag}" for tag in tag_list])
-            
-            # 1. 添加描述（如果有）
-            if description:
-                description_parts.append(description)
-                
-                # 检查描述中是否已有标签行（以#开头的行）
-                has_tag_in_desc = any(line.strip().startswith('#') for line in description.strip().split('\n'))
-                if has_tag_in_desc:
-                    # 描述中已包含标签行，不再追加标签字段
-                    print(f"📝 描述已包含标签，跳过追加")
-                elif formatted_tags:
-                    # 描述中没有标签行，且有标签字段，追加格式化后的标签
-                    description_parts.append(formatted_tags)
-                    print(f"📝 已追加标签到描述: {formatted_tags}")
-            elif formatted_tags:
-                # 没有描述但有标签，只添加标签
-                description_parts.append(formatted_tags)
-                print(f"📝 已添加标签: {formatted_tags}")
-            
-            # 组装最终描述
-            full_description = '\n'.join(description_parts) if description_parts else ""
-            
-            # 匹配本地封面图（优先使用本地封面）
-            cover_path = self._match_local_cover(video_file)
-            if cover_path:
-                print(f"🖼️ 使用本地封面: {Path(cover_path).name}")
-            
-            # 解析日期和时间
+            clean_name = remove_date_prefix(container_name)
+            local_videos[clean_name] = (video_file, container_name)
+            local_videos[container_name] = (video_file, container_name)
+
+        # ========== 第三步：匹配本地视频 / 标记需要下载 ==========
+        local_matched = []      # (video_info, local_path, cover_path)
+        need_download = []      # (video_info, video_url, cover_url)
+        skipped_no_source = []  # 无本地也无云端URL
+
+        for page in pending_pages:
             try:
-                if 'T' in date_str:
-                    publish_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                # 提取字段
+                name_for_match = self._extract_property(page, "Name")
+                short_title = self._extract_property(page, "短标题")
+                title = self._extract_property(page, "标题")
+                description = self._extract_property(page, "描述")
+                tags = self._extract_property(page, "标签")
+                collections_str = self._extract_property(page, "合集")
+                date_str = self._extract_property(page, "发布日期")
+                cover_position = self._extract_property(page, "封面裁剪") or "middle"
+                original_declaration = self._extract_property(page, "声明原创")
+                location = self._extract_property(page, "位置") or "平台默认"
+                publish_mode_notion = self._extract_property(page, "发布方式")
+
+                if not name_for_match or not date_str:
+                    continue
+
+                # 尝试匹配本地视频
+                local_video = None
+                local_cover = None
+                for local_name in [name_for_match, remove_date_prefix(name_for_match)]:
+                    if local_name in local_videos:
+                        local_video, _ = local_videos[local_name]
+                        local_cover = match_local_cover(local_video)
+                        break
+
+                # 解析日期和其他字段
+                publish_date = parse_publish_date(date_str, self.default_hour, self.default_minute)
+                if not publish_date:
+                    continue
+
+                final_short_title = sanitize_short_title(short_title if short_title else "")
+                full_description = assemble_description(title, description, tags, verbose=False)
+                collections = parse_collections(collections_str)
+                publish_mode = calculate_publish_mode(publish_mode_notion, bool(date_str))
+
+                video_info = VideoInfo(
+                    title=title if title else short_title,
+                    short_title=final_short_title,
+                    description=full_description,
+                    tags=tags,
+                    video_path=str(local_video) if local_video else None,
+                    cover_path=str(local_cover) if local_cover else None,
+                    video_url=None,
+                    cover_url=None,
+                    publish_date=publish_date,
+                    collections=collections,
+                    original_declaration=bool(original_declaration) if original_declaration is not None else True,
+                    cover_position=cover_position,
+                    location=location,
+                    name_for_match=name_for_match,
+                    folder_name=name_for_match,
+                    source_mode="notion_hybrid",
+                    notion_page_id=page.get("id"),
+                    publish_mode=publish_mode
+                )
+
+                if local_video:
+                    local_matched.append((video_info, name_for_match))
                 else:
-                    date_part = datetime.fromisoformat(date_str)
-                    # 创建无时区的日期
-                    publish_date = date_part.replace(hour=self.default_hour, minute=self.default_minute)
-                # 确保日期是 offset-naive（无时区）
-                if publish_date.tzinfo is not None:
-                    publish_date = publish_date.replace(tzinfo=None)
+                    # 本地没有，尝试获取云端URL
+                    video_files = self._extract_property(page, "视频") or []
+                    cover_files = self._extract_property(page, "封面") or []
+
+                    if video_files and len(video_files) > 0:
+                        video_info.video_url = video_files[0].get("url")
+                        if cover_files and len(cover_files) > 0:
+                            video_info.cover_url = cover_files[0].get("url")
+                        need_download.append((video_info, name_for_match))
+                    else:
+                        skipped_no_source.append(name_for_match)
+
             except Exception as e:
-                print(f"⚠️ 日期解析失败 '{date_str}': {e}，跳过视频: '{clean_title}'")
+                print(f"⚠️ 处理记录时出错: {e}")
                 continue
-            
-            video_info = VideoInfo(
-                title=title if title else short_title,  # 主标题
-                short_title=final_short_title,  # 短标题（16字以内）
-                description=full_description,  # 视频号描述区（描述+标签）
-                tags=tags,  # 原始标签
-                video_path=str(video_file),
-                cover_path=cover_path,
-                publish_date=publish_date,
-                collections=collections,  # 合集名称列表
-                original_declaration=bool(original_declaration) if original_declaration is not None else True,
-                cover_position=cover_position,  # 封面调整位置
-                location=location,  # 位置设置
-                name_for_match=name_for_match,  # 用于匹配的Name字段
-                folder_name=container_name  # 文件夹名称
-            )
-            videos.append(video_info)
-            print(f"✅ 匹配成功: '{clean_title}' -> 文件 '{container_name}'")
-        
-        print(f"\n🎬 共找到 {len(videos)} 个可上传视频")
-        
-        # 按日期从近到远排序（日期小的先发：11→12→13→14→15）
-        videos.sort(key=lambda x: x.publish_date, reverse=False)
-        
-        print(f"\n找到 {len(videos)} 个视频（按上传顺序）：")
-        for v in videos:
-            print(f"- {v.title} ({v.publish_date.strftime('%Y-%m-%d %H:%M')})")
-        
+
+        # ========== 第四步：显示匹配结果 ==========
+        print_match_summary(
+            local_count=len(local_matched),
+            download_count=len(need_download),
+            no_source_count=len(skipped_no_source),
+            local_names=[name for _, name in local_matched],
+            download_names=[name for _, name in need_download],
+            no_source_names=skipped_no_source
+        )
+
+        # ========== 第五步：汇总并返回 ==========
+        videos = [v for v, _ in local_matched] + [v for v, _ in need_download]
+
+        # 使用公共函数打印最终汇总
+        print_final_video_summary(videos)
+
         return videos
     
     def _scan_videos(self) -> List[Tuple[Path, str]]:
@@ -902,7 +614,7 @@ class NotionDataSource(VideoDataSource):
                     video_items.append((video_files[0], item.name))
                 else:
                     # 多个视频：选择与文件夹名最匹配的那个
-                    best_match, _ = select_best_matching_video(video_files, item.name, verbose=True)
+                    best_match, _ = select_best_matching_video(video_files, item.name, verbose=False)
                     if best_match:
                         video_items.append((best_match, item.name))
         
@@ -1012,18 +724,8 @@ class NotionDataSource(VideoDataSource):
                 # 清理短标题
                 final_short_title = sanitize_short_title(short_title if short_title else "")
                 
-                # 组装描述
-                description_parts = []
-                if title:
-                    description_parts.append(title)
-                if description:
-                    description_parts.append(description)
-                if tags:
-                    tag_list = [t.strip() for t in tags.replace('，', ',').split(',') if t.strip()]
-                    formatted_tags = ' '.join([f"#{tag}" for tag in tag_list])
-                    description_parts.append(formatted_tags)
-                
-                full_description = '\n'.join(description_parts)
+                # 使用公共函数组装描述
+                full_description = assemble_description(title, description, tags, verbose=False)
                 
                 # 解析日期
                 try:
@@ -1080,52 +782,22 @@ class NotionDataSource(VideoDataSource):
             是否更新成功
         """
         try:
-            response = self.client.pages.update(
-                page_id=page_id,
-                properties={
+            url = f"{self.NOTION_API_BASE}/pages/{page_id}"
+            payload = {
+                "properties": {
                     "发布状态": {
                         "select": {
                             "name": status
                         }
                     }
                 }
-            )
-            return response is not None
+            }
+            response = requests.patch(url, headers=self.headers, json=payload)
+            response.raise_for_status()
+            return True
         except Exception as e:
             print(f"❌ 更新状态失败: {e}")
             return False
-    
-    def _calculate_publish_mode(self, publish_mode_notion: Optional[str], date_str: Optional[str]) -> str:
-        """
-        根据发布方式和发布日期计算最终的发布模式
-        
-        优先级逻辑：
-        - 发布方式 = 保存草稿 → "2" (保存草稿)
-        - 发布方式 = 定时发布 + 有发布日期 → "1" (定时发布)
-        - 发布方式 = 定时发布 + 无发布日期 → "2" (降级为保存草稿)
-        - 发布方式 = 空 + 有发布日期 → "1" (默认定时发布)
-        - 发布方式 = 空 + 无发布日期 → "2" (默认保存草稿)
-        
-        Args:
-            publish_mode_notion: Notion 中的"发布方式"字段值
-            date_str: Notion 中的"发布日期"字段值
-            
-        Returns:
-            "1" (定时发布) 或 "2" (保存草稿)
-        """
-        if publish_mode_notion == "保存草稿":
-            return "2"
-        elif publish_mode_notion == "定时发布":
-            if date_str:
-                return "1"
-            else:
-                print(f"⚠️ 发布方式为'定时发布'但无发布日期，降级为保存草稿")
-                return "2"
-        else:  # 发布方式为空
-            if date_str:
-                return "1"  # 有日期，默认定时发布
-            else:
-                return "2"  # 无日期，默认保存草稿
 
 
 if __name__ == "__main__":

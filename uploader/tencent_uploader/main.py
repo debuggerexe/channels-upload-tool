@@ -10,33 +10,7 @@ from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.files_times import get_absolute_path
 from utils.log import tencent_logger
-
-
-def format_str_for_short_title(origin_title: str) -> str:
-    # 定义允许的特殊字符 (根据用户描述更新)
-    # 书名号《》, 引号", 冒号：, 加号+, 问号?, 百分号%, 摄氏度°
-    allowed_special_chars = '《》":+?%°' # 更新：添加冒号，修正引号表示
-
-    # 重写过滤逻辑以提高清晰度并处理两种逗号
-    filtered_chars = []
-    for char in origin_title:
-        if char.isalnum() or char in allowed_special_chars:
-            filtered_chars.append(char)
-        elif char == ',' or char == '，': # 处理英文和中文逗号
-            filtered_chars.append(' ')
-        # 其他所有不符合条件的字符（包括不允许的符号和Emoji）会被自动忽略
-
-    formatted_string = ''.join(filtered_chars)
-
-    # 视频号短标题要求至少6个字，不足补空格，超出截断
-    if len(formatted_string) > 16:
-        formatted_string = formatted_string[:16]
-    # 在截断后检查长度是否小于6
-    if len(formatted_string) < 6:
-        formatted_string += ' ' * (6 - len(formatted_string)) # 补空格
-
-    # 返回处理后的字符串，平台通常会自动处理首尾空格，这里不再strip
-    return formatted_string
+from utils.text_utils import sanitize_short_title
 
 
 async def cookie_auth(account_file):
@@ -486,6 +460,7 @@ class TencentVideo(object):
             await file_input.set_input_files(self.file_path)
             
             # 【优化】并行执行：等待上传完成 + 填写表单（封面除外）
+            # 大视频上传期间可以填写标题、话题等信息，但封面必须等视频就绪
             tencent_logger.info("  [-] 开始并行处理：视频上传 + 表单填写（封面等待上传完成后处理）")
             upload_task = asyncio.create_task(self.detect_upload_status(page))
             fill_form_task = asyncio.create_task(self.fill_form_during_upload(page))
@@ -504,12 +479,8 @@ class TencentVideo(object):
                 await self.click_save_draft(page)
             else:
                 # 定时发布模式（默认）
-                # 默认定时发布：无论publish_date是否为0都定时，若为0则设为次日9点
-                if not self.publish_date or self.publish_date == 0:
-                    now = datetime.now()
-                    self.publish_date = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                await self.set_schedule_time_tencent(page, self.publish_date)
-                # 点击发表
+                # 注意：定时日期已在 fill_form_during_upload 中设置，此处直接点击发表
+                tencent_logger.info("  [-] 定时发布模式，点击发表")
                 await self.click_publish(page)
 
             await context.storage_state(path=f"{self.account_file}")  # 保存cookie
@@ -584,6 +555,14 @@ class TencentVideo(object):
             tencent_logger.info("  [-] 正在设置位置信息...")
             await self.set_location(page)
             
+            # 6. 【新增】设置定时发布日期（上传期间可提前设置）
+            if self.publish_mode != '2':  # 非保存草稿模式
+                tencent_logger.info("  [-] 正在设置定时发布...")
+                if not self.publish_date or self.publish_date == 0:
+                    from datetime import datetime, timedelta
+                    self.publish_date = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                await self.set_schedule_time_tencent(page, self.publish_date)
+            
             tencent_logger.info("  [-] 表单填写完成（封面等待上传完成后处理）")
             
         except Exception as e:
@@ -591,8 +570,11 @@ class TencentVideo(object):
             # 不抛出异常，让上传流程继续
 
     async def add_title_tags(self, page):
-        await page.locator("div.input-editor").click()
-        await page.keyboard.type(self.title_and_tags)
+        editor = page.locator("div.input-editor")
+        await editor.click()
+        # 【修复】使用fill方法填入内容，保留换行符
+        # keyboard.type会把\n当作回车键，导致换行丢失
+        await editor.fill(self.title_and_tags)
         tencent_logger.info("已填写标题和话题")
 
     async def add_short_title(self, page):
@@ -641,27 +623,132 @@ class TencentVideo(object):
             raise
 
     async def detect_upload_status(self, page):
+        """检测视频上传和处理状态
+
+        对于大视频，仅检测"发表"按钮不可靠，需要额外检测视频封面预览是否就绪
+        """
         retry_count = 0
         max_retries = 3
+        button_ready = False
+        video_preview_ready = False
+        video_duration_ready = False  # 新增：视频时长是否显示
+        cover_edit_ready = False  # 新增：封面编辑是否就绪
+        check_count = 0
+
         while True:
             try:
-                # 匹配删除按钮，代表视频上传完毕
-                if "weui-desktop-btn_disabled" not in await page.get_by_role("button", name="发表").get_attribute('class'):
-                    tencent_logger.info("  [-]视频上传完毕")
+                check_count += 1
+
+                # 1. 检查发表按钮是否可用（基础检测）
+                try:
+                    publish_btn = page.get_by_role("button", name="发表")
+                    btn_class = await publish_btn.get_attribute('class')
+                    if "weui-desktop-btn_disabled" not in btn_class:
+                        if not button_ready:
+                            button_ready = True
+                            tencent_logger.info("  [-] 发表按钮已启用，继续检测视频处理状态...")
+                    else:
+                        button_ready = False
+                except Exception:
+                    button_ready = False
+
+                # 2. 【关键】检查视频封面预览是否就绪
+                if button_ready and not video_preview_ready:
+                    cover_preview_selectors = [
+                        '.cover-wrap img[src*="mmbiz.qpic.cn"]',
+                        '.cover-wrap img[src*="channels.weixin.qq.com"]',
+                        '[class*="cover"] img[src*="http"]',
+                        '.video-preview img',
+                        '.cover-editor-preview img',
+                    ]
+
+                    for selector in cover_preview_selectors:
+                        try:
+                            img_locator = page.locator(selector).first
+                            if await img_locator.count() > 0:
+                                src = await img_locator.get_attribute('src')
+                                if src and len(src) > 10:
+                                    video_preview_ready = True
+                                    tencent_logger.info(f"  [-] 视频预览已就绪")
+                                    break
+                        except Exception:
+                            continue
+
+                # 3. 【新增】检查视频时长是否显示（说明视频已完全解析）
+                if button_ready and not video_duration_ready:
+                    duration_selectors = [
+                        '.video-duration',
+                        '.duration',
+                        '[class*="duration"]',
+                        '.video-info .time',
+                    ]
+                    for selector in duration_selectors:
+                        try:
+                            duration_locator = page.locator(selector).first
+                            if await duration_locator.count() > 0:
+                                duration_text = await duration_locator.text_content()
+                                if duration_text and len(duration_text.strip()) > 0:
+                                    video_duration_ready = True
+                                    tencent_logger.info(f"  [-] 视频时长已显示: {duration_text.strip()}")
+                                    break
+                        except Exception:
+                            continue
+
+                # 4. 【新增】检查封面编辑按钮是否就绪
+                if button_ready and video_preview_ready and not cover_edit_ready:
+                    cover_edit_selectors = [
+                        '.cover-editor-btn',
+                        '.cover-edit-btn',
+                        '[class*="cover-edit"]',
+                        'button:has-text("更换封面")',
+                        '.cover-wrap .edit-btn',
+                    ]
+                    for selector in cover_edit_selectors:
+                        try:
+                            edit_btn = page.locator(selector).first
+                            if await edit_btn.count() > 0:
+                                is_visible = await edit_btn.is_visible()
+                                is_enabled = await edit_btn.is_enabled()
+                                if is_visible and is_enabled:
+                                    cover_edit_ready = True
+                                    tencent_logger.info(f"  [-] 封面编辑按钮就绪")
+                                    break
+                        except Exception:
+                            continue
+
+                # 5. 【关键】综合判断：按钮可用 + 视频预览就绪 = 上传完成
+                # 封面编辑区域状态由 handle_cover 自己检测和处理
+                if button_ready and video_preview_ready:
+                    if cover_edit_ready:
+                        tencent_logger.info("  [-] 视频上传和处理完毕（封面编辑区域已就绪）")
+                    else:
+                        tencent_logger.info("  [-] 视频上传和处理完毕（封面编辑区域将在处理时检测）")
                     break
-                else:
-                    tencent_logger.info("  [-] 正在上传视频中...")
-                    await asyncio.sleep(2)
-                    # 出错了视频出错
-                    if await page.locator('div.status-msg.error').count() and await page.locator('div.media-status-content div.tag-inner:has-text("删除")').count():
-                        retry_count += 1
-                        if retry_count > max_retries:
-                            tencent_logger.error(f"  [-] 上传失败已达最大重试次数（{max_retries}次），终止流程。")
-                            raise Exception("视频上传失败，重试次数过多，已终止。")
-                        tencent_logger.error(f"  [-] 发现上传出错了...准备重试（第{retry_count}次）")
-                        await self.handle_upload_error(page)
+
+                # 6. 每10次检测输出一次进度
+                if check_count % 10 == 0:
+                    if not button_ready:
+                        tencent_logger.info(f"  [-] 视频上传中...")
+                    elif button_ready and not video_preview_ready:
+                        tencent_logger.info(f"  [-] 视频上传完成，等待视频预览就绪...")
+                    else:
+                        tencent_logger.info(f"  [-] 视频上传中...")
+
+                # 7. 检查是否出错
+                if await page.locator('div.status-msg.error').count() and await page.locator('div.media-status-content div.tag-inner:has-text("删除")').count():
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        tencent_logger.error(f"  [-] 上传失败已达最大重试次数（{max_retries}次），终止流程。")
+                        raise Exception("视频上传失败，重试次数过多，已终止。")
+                    tencent_logger.error(f"  [-] 发现上传出错了...准备重试（第{retry_count}次）")
+                    await self.handle_upload_error(page)
+
+                await asyncio.sleep(2)
+
             except Exception as e:
-                tencent_logger.info(f"  [-] 正在上传视频中...（异常：{e}）")
+                if "上传失败已达最大重试次数" in str(e):
+                    raise
+                tencent_logger.info(f"  [-] 正在上传视频中...（检测异常：{e}）")
                 await asyncio.sleep(2)
 
     async def add_collection(self, page):
