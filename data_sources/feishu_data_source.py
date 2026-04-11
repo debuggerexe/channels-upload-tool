@@ -21,7 +21,8 @@ from utils.match_utils import (
     select_best_matching_video,
     find_best_match_in_list,
     match_local_video,
-    match_local_cover
+    match_local_cover,
+    detect_local_dual_covers
 )
 from utils.text_utils import (
     assemble_description,
@@ -364,12 +365,18 @@ class FeishuDataSource(VideoDataSource):
                     continue
                 
                 # 尝试匹配本地视频
+                # 从本地匹配封面（检测双图模式：竖图+横图）
                 local_video = None
                 local_cover = None
+                local_horizontal_cover = None
                 for local_name in [name_for_match, remove_date_prefix(name_for_match)]:
                     if local_name in local_videos:
                         local_video, _ = local_videos[local_name]
-                        local_cover = match_local_cover(local_video)
+                        # 检测双图模式
+                        vertical_cover, horizontal_cover = detect_local_dual_covers(local_video)
+                        if vertical_cover:
+                            local_cover = vertical_cover
+                            local_horizontal_cover = horizontal_cover
                         break
                 
                 # 解析日期和其他字段
@@ -388,6 +395,7 @@ class FeishuDataSource(VideoDataSource):
                     tags=tags,
                     video_path=str(local_video) if local_video else None,
                     cover_path=str(local_cover) if local_cover else None,
+                    horizontal_cover_path=str(local_horizontal_cover) if local_horizontal_cover else None,
                     video_url=None,
                     cover_url=None,
                     publish_date=publish_date,
@@ -408,11 +416,14 @@ class FeishuDataSource(VideoDataSource):
                     # 本地没有，尝试获取云端URL
                     video_attachment = self._extract_attachment_url(record, "视频")
                     cover_attachment = self._extract_attachment_url(record, "封面")
+                    horizontal_cover_attachment = self._extract_attachment_url(record, "横封面")
                     
                     if video_attachment:
                         video_info.video_url = video_attachment.get('url')
                         if cover_attachment:
                             video_info.cover_url = cover_attachment.get('url')
+                        if horizontal_cover_attachment:
+                            video_info.horizontal_cover_url = horizontal_cover_attachment.get('url')
                         need_download.append((video_info, name_for_match))
                     else:
                         skipped_no_source.append(name_for_match)
@@ -539,10 +550,15 @@ class FeishuDataSource(VideoDataSource):
                     video.video_path = str(local_video_path)
                     print(f"📁 使用本地视频: {local_video_path.name}")
                     
-                    local_cover_path = match_local_cover(local_video_path)
-                    if local_cover_path:
-                        video.cover_path = str(local_cover_path)
-                        print(f"📁 使用本地封面: {Path(local_cover_path).name}")
+                    # 【修复】使用双图检测替代单图匹配
+                    vertical_cover, horizontal_cover = detect_local_dual_covers(local_video_path)
+                    if vertical_cover:
+                        video.cover_path = vertical_cover
+                        if horizontal_cover:
+                            video.horizontal_cover_path = horizontal_cover
+                            print(f"📁 本地竖封面: {Path(vertical_cover).name}, 横封面: {Path(horizontal_cover).name}")
+                        else:
+                            print(f"📁 本地封面: {Path(vertical_cover).name}")
                 else:
                     # 本地没有，从云端下载
                     if video.video_url:
@@ -555,7 +571,7 @@ class FeishuDataSource(VideoDataSource):
                         )
                         video.video_path = video.temp_local_video_path
                 
-                # 封面处理
+                # 封面处理（竖封面）
                 if not video.cover_path and video.cover_url:
                     try:
                         from urllib.parse import urlparse
@@ -572,6 +588,24 @@ class FeishuDataSource(VideoDataSource):
                     except Exception as cover_error:
                         print(f"⚠️ 封面下载失败: {cover_error}")
                         video.cover_url = None
+                
+                # 横封面处理
+                if not video.horizontal_cover_path and video.horizontal_cover_url:
+                    try:
+                        from urllib.parse import urlparse
+                        parsed_url = urlparse(video.horizontal_cover_url)
+                        h_cover_ext = Path(parsed_url.path).suffix or '.jpg'
+                        h_cover_filename = f"{video.name_for_match or 'cover'}_h_{video.publish_date.strftime('%Y%m%d')}{h_cover_ext}"
+                        video.temp_local_horizontal_cover_path = await self._download_file_async(
+                            video.horizontal_cover_url,
+                            h_cover_filename,
+                            progress_callback,
+                            max_retries=2
+                        )
+                        video.horizontal_cover_path = video.temp_local_horizontal_cover_path
+                    except Exception as h_cover_error:
+                        print(f"⚠️ 横封面下载失败: {h_cover_error}")
+                        video.horizontal_cover_url = None
                 
                 return video
                 
@@ -638,7 +672,20 @@ class FeishuDataSource(VideoDataSource):
         except Exception as e:
             print(f"❌ 更新发布状态失败: {e}")
             return False
-    
+
+    def update_video_status(self, record_id: str, status: str) -> bool:
+        """
+        更新视频状态（兼容接口，调用 update_publish_status）
+
+        Args:
+            record_id: 飞书记录ID
+            status: 新状态（"已发布"或"发布失败"）
+
+        Returns:
+            是否更新成功
+        """
+        return self.update_publish_status(record_id, status)
+
     def create_record(self, fields: dict) -> Optional[str]:
         """
         创建新的飞书多维表格记录

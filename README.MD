@@ -1,6 +1,9 @@
-# 微信视频号自动上传工具
+# 微信视频号 + 抖音自动上传工具
 
-自动化发布视频到微信视频号平台，支持多种数据源（Notion、飞书、本地文件）。
+自动化发布视频到**微信视频号**和**抖音**平台，支持多种数据源（Notion、飞书、本地文件）。
+
+- 视频号入口: `upload_wechat_videos.py`
+- 抖音入口: `upload_douyin_videos.py`
 
 ## 功能特性
 
@@ -9,17 +12,27 @@
   - 优先匹配本地 `videos/` 文件夹中的视频，无本地则从云端下载
   - 智能本地缓存，避免重复下载
 
+- **多平台支持**
+  - 微信视频号：支持短标题（6-16字）、原创声明、合集添加
+  - 抖音：支持 9:16 竖屏封面、话题标签、同步头条/西瓜视频、定时发布、合集添加
+
 - **智能处理**
   - 智能文件名匹配（自动去除日期前缀）
   - 短标题自动清理（只保留中文字符，**超过16字自动截断**）
-  - 封面智能裁剪（高图自动裁剪为3:4比例）
-  - 自动声明原创、自动添加合集
+  - 封面智能裁剪（视频号 3:4，抖音 9:16）
+  - 自动声明原创、自动添加合集（视频号）
   - **并行上传优化**（上传期间填写表单，节省时间）
 
 - **批量上传**
   - 按发布日期自动排序
   - 失败自动重试（网络波动时自动重试 API 请求）
   - 上传成功后自动清理临时文件，本地缓存保留
+
+- **抖音封面双图支持**
+  - 自动检测本地竖图（3:4）和横图（4:3）封面
+  - 单张 16:9 图片自动裁剪为竖/横双封面
+  - 智能裁剪位置支持（top/middle/bottom/left/right）
+  - 自动清理临时裁剪文件
 
 ---
 
@@ -39,7 +52,9 @@
 │   └── 📄 local_data_source.py    # 本地数据源（txt配置）
 │
 ├── 📁 uploader/                   # 上传器层
-│   └── 📁 tencent_uploader/       # 微信视频号上传器
+│   ├── 📁 tencent_uploader/       # 微信视频号上传器
+│   │   └── 📄 main.py             # Playwright 自动化上传核心
+│   └── 📁 douyin_uploader/        # 抖音上传器
 │       └── 📄 main.py             # Playwright 自动化上传核心
 │
 ├── 📁 utils/                      # 工具层
@@ -66,16 +81,35 @@
 
 ## 快速开始
 
+### 微信视频号
 ```bash
-source .venv/bin/activate && python upload_wechat_videos.py --mode cloud --no-interactive
+source .venv/bin/activate && python upload_wechat_videos.py --mode notion --no-interactive
+```
+
+### 抖音
+```bash
+source .venv/bin/activate && python upload_douyin_videos.py --mode notion --no-interactive
+```
+
+### 手动打开浏览器
+```bash
+# 交互式选择（不带参数）
+python open_browser.py
+
+# 直接打开指定平台
+python open_browser.py --tencent  # 微信视频号
+python open_browser.py --douyin   # 抖音
+
+# 查看帮助
+python open_browser.py -h
 ```
 
 ### 上传流程
 
-1. 从 Notion 获取待发布视频列表（按发布时间排序）
+1. 从 Notion/飞书 获取待发布视频列表（按发布时间排序）
 2. 优先检查本地 `videos/` 文件夹，如有匹配则直接使用
-3. 无本地文件则从 Notion 云端下载到 `temp/`
-4. 上传视频到微信视频号，期间并行填写表单（标题、合集、原创声明等）
+3. 无本地文件则从云端下载到 `temp/`
+4. 上传视频到目标平台（视频号/抖音），期间并行填写表单
 5. 上传完成后清理 `temp/` 临时文件，本地 `videos/` 文件保留
 
 ---
@@ -476,6 +510,145 @@ playwright install
 
 ## 更新日志
 
+### 2026-04-11 (抖音合集功能 - 最终方案)
+- **功能**：新增抖音合集选择功能
+- **抖音合集UI结构**：双下拉框设计
+  1. 第一个下拉框（`.select-mix-type-G9iqb2`）：选择合集类型（合集/日历/图文集）
+  2. 第二个下拉框（`.select-collection-nkL6sA`）：选择具体合集
+- **实现内容**：
+  1. **新增 `collections` 参数** @ `uploader/douyin_uploader/main.py`
+     - `DouYinVideo.__init__` 新增 `collections` 参数接收合集名称列表
+     - 新增 `add_collection()` 方法处理合集选择逻辑
+  2. **操作步骤**：
+     - 点击合集类型下拉框 → 选择"合集"
+     - 点击合集选择下拉框 → 展开合集列表
+     - 从 `.option-title-WKxxu3` 获取纯净合集名称（不含作品数量后缀）
+     - 完全匹配数据源配置的合集名称
+  3. **集成到上传流程**：
+     - 在封面上传后、同步设置前调用 `add_collection()`
+     - `upload_douyin_videos.py` 传递 `video.collections` 到上传器
+- **关键经验**：
+  - 抖音合集名称显示格式：`合集名称` + `共X个作品`（后缀在 `.option-extra-text-i_ch3r` 中）
+  - 必须使用 `.option-title-WKxxu3` 选择器获取纯净名称才能正确匹配
+  - 先点击类型下拉框，再点击选择下拉框，这是抖音的交互顺序
+- **选择器**：`.select-mix-type-G9iqb2`, `.select-collection-nkL6sA`, `.option-title-WKxxu3`
+
+### 2026-04-11 (抖音双封面系统)
+- **功能**：支持独立竖封面和横封面，云端/本地双模式
+- **云端字段**：
+  - `封面`：竖封面（3:4，9:16等竖图）
+  - `横封面`：横封面（4:3，16:9等横图，可选）
+- **裁剪指令扩展**：
+  | 指令 | 竖封面(3:4) | 横封面(4:3) |
+  |------|------------|------------|
+  | middle | 不裁剪 | 不裁剪 |
+  | top | 从顶部裁剪 | - |
+  | bottom | 从底部裁剪 | - |
+  | left | - | 从左侧裁剪 |
+  | right | - | 从右侧裁剪 |
+- **三种模式**：
+  1. **单封面模式**（向后兼容）：只有`封面`字段，自动裁剪为竖/横双封面
+  2. **云端双封面**：`封面`+`横封面`字段，各自独立处理
+  3. **本地双图**：按图片比例自动识别（<1:1竖图，>1:1横图）
+- **实现内容**：
+  1. **新增 `prepare_dual_covers()`** @ `utils/cover_cropper.py`
+     - 独立处理竖封面（裁剪为3:4，支持top/bottom）
+     - 独立处理横封面（裁剪为4:3，支持left/right）
+     - middle时均不裁剪
+  2. **数据结构扩展**：`VideoInfo` 新增 `horizontal_cover_path` 和 `horizontal_cover_url`
+  3. **数据源扩展**：Notion/飞书支持读取`横封面`字段并下载
+  4. **上传器适配**：`DouYinVideo` 新增 `horizontal_thumbnail_path` 参数
+- **视频号功能**：保持原有 `crop_cover_to_34()` 不变，不受影响
+
+### 2026-04-11 (抖音封面裁剪功能-单封面)
+- **功能**：新增抖音封面自动裁剪，支持竖封面(3:4)和横封面(4:3)
+- **实现内容**：
+  1. **新增 `prepare_douyin_covers()` 函数** @ `utils/cover_cropper.py`
+     - 原图3:4比例：竖封面直接使用，横封面从原图裁剪出4:3
+     - 原图9:16(高图)：竖封面裁剪为3:4，横封面从原图裁剪出4:3
+     - 支持 `top/middle/bottom` 三种裁剪位置
+  2. **集成到上传流程**：
+     - `upload_douyin_videos.py` 读取 `cover_position` 字段
+     - `DouYinVideo` 类新增 `cover_position` 参数
+     - `set_thumbnail()` 方法调用封面裁剪
+- **文件名规则**：
+  - 竖封面：`{原文件名}_34.jpg` 或 `{原文件名}_{position}_34.jpg`
+  - 横封面：`{原文件名}_43.jpg` 或 `{原文件名}_{position}_43.jpg`
+- **视频号功能**：保持原有 `crop_cover_to_34()` 不变，不受影响
+
+### 2026-04-11 (抖音标题/描述填入逻辑修复)
+- **问题**：抖音错误地使用 `short_title`，且话题标签填入方式不正确
+- **修复内容**：
+  1. **标题**：改用 `title` 字段（30字限制），不再使用 `short_title`
+  2. **描述区域**：新增 `description` 参数，将描述和话题标签一起填入作品描述区域
+  3. **格式**：描述 + 换行 + `#标签1 #标签2 ...`
+
+- **平台差异**：
+  - **抖音**：标题和描述分开，标题30字，描述1000字，标签填入描述区
+  - **视频号**：使用短标题（6-16字），保持原有逻辑不变
+
+- **选择器**：
+  - 标题：`input.semi-input[placeholder*="作品标题"]`
+  - 描述：`.zone-container[data-placeholder*="简介"]`
+
+### 2026-04-11 (抖音定时发布 - 最终成功方案)
+- **问题**：定时发布时间设置后总被平台重置为当前时间
+- **解决方案**：
+  1. 点击"定时发布"选项
+  2. 点击日期输入框打开日历弹窗
+  3. 直接 `fill` 输入日期时间字符串
+  4. 点击空白处或按 Escape 关闭弹窗触发保存
+
+- **为什么成功**：
+  - 先点击输入框打开日历弹窗（平台需要这个触发）
+  - 使用 `fill` 方法而非键盘输入，Playwright会自动处理完整输入流程
+  - 点击空白处触发平台保存机制，时间被正确接受
+
+- **核心经验**：
+  - **选择器**：`input.semi-input[placeholder="日期和时间"]`
+  - **方法**：`await date_input.fill("2026-04-24 08:30")`
+  - **要点**：先点击打开弹窗，再fill输入，最后点击空白处关闭
+
+- **错误弯路**（反面教材）：
+  - 键盘输入后按 Tab/Enter 离开 → 平台不接受，重置时间
+  - 直接 fill 输入不打开弹窗 → 可能不生效
+  - 复杂JS强制设置 value → 平台验证失败
+  - 日历弹窗点击具体日期 → 选择器复杂且不稳定
+
+### 2026-04-11 (抖音封面上传 - 最终成功方案)
+- **完整流程**：
+  1. 点击"选择封面"打开封面处理弹窗
+  2. **竖封面**：不点击任何按钮，直接 `set_input_files` 设置文件，等待5秒
+  3. 点击"设置横封面"切换到横封面界面
+  4. **横封面**：同样直接 `set_input_files` 设置文件，等待2秒
+  5. 点击"完成"按钮关闭弹窗
+  6. 封面验证通过（放宽验证，允许blob URL）
+
+- **为什么之前失败**：
+  - 点击"上传封面"按钮后再设置文件，触发了平台的**裁剪弹窗流程**
+  - 复杂的JS File对象创建、base64转换、手动事件触发反而干扰了平台原生上传机制
+  - 过度的事件触发（focus/click/input/change/blur）可能导致平台上传状态混乱
+  - 尝试手动处理裁剪弹窗的保存逻辑不可靠，容易失败
+
+- **为什么这次成功**：
+  - **不点击任何上传按钮**，直接操作隐藏的input元素设置文件
+  - 使用原生`set_input_files`，让Playwright自动处理文件设置
+  - 平台检测到文件设置后，**自动完成上传流程**，无需裁剪弹窗二次确认
+  - 简化即正义：移除所有复杂的事件触发和手动File对象创建
+
+- **核心经验**：
+  - **选择器**：`div[class^='semi-upload upload'] >> input.semi-upload-hidden-input`
+  - **方法**：`await page.locator(selector).set_input_files(thumbnail_path)`
+  - **要点**：不要点击上传按钮，直接设置文件；不要手动创建File对象，交给Playwright处理
+  - **验证放宽**：blob URL 也视为成功，因为平台可能使用blob作为预览
+
+### 2026-04-10 (Bug修复 - 抖音上传器)
+- **修复抖音上传器多个问题**
+  - **修复 `success` 变量名冲突**：第166行的布尔变量覆盖了导入的 `success()` 函数，导致 `TypeError: 'bool' object is not callable`
+  - **删除位置设置操作**：抖音平台不需要处理地理位置，删除 `set_location()` 调用避免超时
+  - **修复封面上传逻辑**：跳过点击不可见的"上传封面"区域，直接操作 `input.semi-upload-hidden-input` 元素设置文件
+  - **严格验证封面上传**：检查 canvas/img 尺寸（>50px）确认上传成功，否则报错
+
 ### 2026-04-07 (功能增强 - 飞书记录创建)
 - **新增 `FeishuDataSource.create_record()` 方法**
   - 支持创建飞书多维表格新记录
@@ -844,10 +1017,85 @@ playwright install
 
 ---
 
+## 抖音平台使用说明
+
+### 首次使用
+
+1. **获取 Cookie**
+   ```bash
+   python examples/get_douyin_cookie.py
+   ```
+   扫码登录后 Cookie 将保存到 `cookies/douyin/account.json`
+
+2. **运行上传**
+   ```bash
+   # 本地模式
+   python upload_douyin_videos.py --mode local
+
+   # Notion 混合模式
+   python upload_douyin_videos.py --mode notion
+
+   # 飞书混合模式
+   python upload_douyin_videos.py --mode feishu
+
+   # 非交互模式（定时发布）
+   python upload_douyin_videos.py --mode notion --publish 1 --no-interactive
+   ```
+
+### 抖音与视频号的差异
+
+| 功能 | 视频号 | 抖音 |
+|------|--------|------|
+| 入口脚本 | `upload_wechat_videos.py` | `upload_douyin_videos.py` |
+| Cookie 路径 | `cookies/tencent/account.json` | `cookies/douyin/account.json` |
+| 封面比例 | 3:4 横屏 | 9:16 竖屏 |
+| 标题长度 | 短标题 6-16 字 | 主标题 ≤30 字 |
+| 原创声明 | 支持 | 不支持（抖音自动检测）|
+| 同步平台 | 无 | 支持同步到头条/西瓜视频 |
+| 话题格式 | #话题 | #话题 |
+| 定时发布 | 支持 | 支持 |
+
+### 抖音数据源字段
+
+抖音使用与视频号**完全一致**的数据库字段：
+
+- **Name**：用于匹配本地视频文件
+- **短标题**：视频标题（≤30字，抖音没有短标题限制，作为主标题使用）
+- **标题**：与短标题拼接使用
+- **描述**：视频描述内容
+- **标签**：话题标签（#话题）
+- **发布日期**：定时发布时间
+- **发布状态**：待发布/已发布/发布失败
+- **视频**：云端视频文件（Files & media 类型）
+- **封面**：封面图片（Files & media 类型）
+- **位置**：地理位置（默认杭州市）
+
+---
+
 ## TODO / 待办事项
 
 ### [待定] 无封面时裁剪默认封面
 - **需求**：当本地和云端都没有封面图时，`cover_position`（top/bottom）字段仍应生效
 - **方案**：用 FFmpeg 截取视频第一帧，然后按 `cover_position` 裁剪为 3:4 比例，最后上传裁剪后的封面
 - **状态**：待开发（不影响现有功能，无封面时平台会自动使用视频第一帧）
+
+---
+
+## 更新日志
+
+### 2026-04-10 (重大功能 - 抖音平台支持)
+- **新增抖音批量自动上传功能** - 完整支持抖音创作者中心视频上传
+  - 新增 `uploader/douyin_uploader/` 模块，封装抖音上传逻辑
+  - 新增 `upload_douyin_videos.py` 入口脚本，支持 local/notion/feishu 三种模式
+  - 支持定时发布、封面上传、话题标签、地理位置设置
+  - 支持同步到头条/西瓜视频
+  - Cookie 路径：`cookies/douyin/account.json`
+- **复用现有架构**
+  - 完全复用 `data_sources/` 数据源层（Notion/飞书/本地）
+  - 完全复用 `utils/` 工具层（文本处理、文件匹配、输出美化）
+  - 数据库字段与视频号完全一致，无需额外配置
+- **零侵入设计**
+  - 不修改任何现有视频号代码
+  - 视频号功能完全不受影响
+  - 独立维护，便于后续扩展其他平台
 

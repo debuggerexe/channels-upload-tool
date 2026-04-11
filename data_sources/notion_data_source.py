@@ -21,7 +21,8 @@ from utils.match_utils import (
     select_best_matching_video,
     find_best_match_in_list,
     match_local_video,
-    match_local_cover
+    match_local_cover,
+    detect_local_dual_covers
 )
 from utils.text_utils import (
     assemble_description,
@@ -307,6 +308,7 @@ class NotionDataSource(VideoDataSource):
                 # 【云端文件】从 Notion 读取视频文件和封面图片
                 video_files = self._extract_property(page, "视频") or []
                 cover_files = self._extract_property(page, "封面") or []
+                horizontal_cover_files = self._extract_property(page, "横封面") or []
                 
                 # 【状态筛选】从 Notion 读取发布状态，筛选待发布和发布失败的视频
                 publish_status = self._extract_property(page, "发布状态")
@@ -355,6 +357,11 @@ class NotionDataSource(VideoDataSource):
                 if cover_files and len(cover_files) > 0:
                     cover_url = cover_files[0].get("url")
                 
+                # 获取横封面文件 URL
+                horizontal_cover_url = None
+                if horizontal_cover_files and len(horizontal_cover_files) > 0:
+                    horizontal_cover_url = horizontal_cover_files[0].get("url")
+                
                 video_info = VideoInfo(
                     title=title if title else short_title,
                     short_title=final_short_title,
@@ -372,6 +379,7 @@ class NotionDataSource(VideoDataSource):
                     source_mode="notion",
                     video_url=video_url,
                     cover_url=cover_url,
+                    horizontal_cover_url=horizontal_cover_url,
                     notion_page_id=page.get("id"),  # 保存 Notion 页面 ID 用于更新状态
                     publish_mode=publish_mode  # 发布方式（"1"或"2"）
                 )
@@ -510,7 +518,11 @@ class NotionDataSource(VideoDataSource):
                 for local_name in [name_for_match, remove_date_prefix(name_for_match)]:
                     if local_name in local_videos:
                         local_video, _ = local_videos[local_name]
-                        local_cover = match_local_cover(local_video)
+                        # 检测双图模式（竖图+横图）
+                        vertical_cover, horizontal_cover = detect_local_dual_covers(local_video)
+                        if vertical_cover:
+                            local_cover = vertical_cover
+                            local_horizontal_cover = horizontal_cover
                         break
 
                 # 解析日期和其他字段
@@ -530,6 +542,7 @@ class NotionDataSource(VideoDataSource):
                     tags=tags,
                     video_path=str(local_video) if local_video else None,
                     cover_path=str(local_cover) if local_cover else None,
+                    horizontal_cover_path=str(local_horizontal_cover) if local_horizontal_cover else None,
                     video_url=None,
                     cover_url=None,
                     publish_date=publish_date,

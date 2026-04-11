@@ -411,3 +411,39 @@ def print_final_video_summary(videos: list) -> None:
         source = "本地" if v.video_path else "云端"
         date_str = v.publish_date.strftime('%Y-%m-%d') if hasattr(v.publish_date, 'strftime') else str(v.publish_date)
         print(f"  • {v.name_for_match} ({date_str}) [{source}]")
+
+
+def print_final_summary(success_videos: list, failed_videos: list) -> None:
+    """
+    打印最终上传结果汇总
+    
+    Args:
+        success_videos: 成功上传的视频列表
+        failed_videos: 上传失败的视频列表
+    """
+    success_count = len(success_videos)
+    failed_count = len(failed_videos)
+    total = success_count + failed_count
+    
+    print(f"\n{Colors.BRIGHT_BLUE}{Colors.BOLD}{'=' * 50}{Colors.RESET}")
+    print(f"{Colors.BRIGHT_BLUE}{Colors.BOLD}📊 上传结果汇总{Colors.RESET}")
+    print(f"{Colors.BRIGHT_BLUE}{Colors.BOLD}{'=' * 50}{Colors.RESET}")
+    print(f"\n总数: {total} 个视频")
+    print(f"{Colors.BRIGHT_GREEN}✅ 成功: {success_count} 个{Colors.RESET}")
+    if failed_count > 0:
+        print(f"{Colors.BRIGHT_RED}❌ 失败: {failed_count} 个{Colors.RESET}")
+        print(f"\n{Colors.YELLOW}失败视频列表:{Colors.RESET}")
+        for v in failed_videos:
+            print(f"  • {v.name_for_match or v.title}")
+    print(f"\n{Colors.BRIGHT_BLUE}{Colors.BOLD}{'=' * 50}{Colors.RESET}")
+
+
+def print_douyin_header() -> None:
+    """打印抖音上传器的标题头"""
+    width = get_term_width()
+    print(f"\n{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{'=' * width}{Colors.RESET}")
+    print(f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{'抖音视频批量自动上传工具'.center(width)}{Colors.RESET}")
+    print(f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{'=' * width}{Colors.RESET}")
+    print(f"{Colors.DIM}支持模式: local (本地) | notion (Notion云端) | feishu (飞书云端){Colors.RESET}")
+    print(f"{Colors.DIM}支持功能: 定时发布 | 封面上传 | 话题标签 | 同步头条/西瓜{Colors.RESET}")
+    print(f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{'=' * width}{Colors.RESET}")

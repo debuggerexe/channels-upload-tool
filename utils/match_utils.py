@@ -320,3 +320,65 @@ def match_local_cover(video_path: Path) -> Optional[str]:
             return str(cover_files[0])
     
     return None
+
+
+def detect_local_dual_covers(video_path: Path) -> tuple:
+    """
+    检测本地双图模式（竖图 + 横图）
+    
+    在同目录下查找封面图片，根据宽高比识别竖图(3:4)和横图(4:3)
+    
+    Args:
+        video_path: 视频文件路径
+        
+    Returns:
+        (竖封面路径, 横封面路径) - 如果只有单图则横封面为 None
+    """
+    from PIL import Image
+    
+    folder = video_path.parent
+    cover_extensions = ['.jpg', '.jpeg', '.png', '.webp']
+    
+    all_covers = []
+    for ext in cover_extensions:
+        all_covers.extend(folder.glob(f"*{ext}"))
+    
+    if not all_covers:
+        return None, None
+    
+    vertical_cover = None
+    horizontal_cover = None
+    
+    ratio_34 = 3 / 4   # 0.75 - 竖图目标比例
+    ratio_43 = 4 / 3   # 1.333 - 横图目标比例
+    
+    for cover_path in all_covers:
+        try:
+            with Image.open(cover_path) as img:
+                width, height = img.size
+                if height == 0:
+                    continue
+                ratio = width / height
+                
+                # 判断是否为竖图（3:4比例，约0.75）
+                if abs(ratio - ratio_34) < 0.05:
+                    vertical_cover = str(cover_path)
+                # 判断是否为横图（4:3比例，约1.333）
+                elif abs(ratio - ratio_43) < 0.05:
+                    horizontal_cover = str(cover_path)
+                # 其他比例的图片，按宽高比粗略分类
+                elif ratio < 1.0:  # 竖向图片
+                    if vertical_cover is None:
+                        vertical_cover = str(cover_path)
+                else:  # 横向图片
+                    if horizontal_cover is None:
+                        horizontal_cover = str(cover_path)
+        except Exception:
+            continue
+    
+    # 如果只有一个封面，优先作为竖封面
+    if vertical_cover is None and horizontal_cover is not None:
+        vertical_cover = horizontal_cover
+        horizontal_cover = None
+    
+    return vertical_cover, horizontal_cover
