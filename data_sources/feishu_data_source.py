@@ -673,17 +673,19 @@ class FeishuDataSource(VideoDataSource):
             print(f"❌ 更新发布状态失败: {e}")
             return False
 
-    def update_video_status(self, record_id: str, status: str) -> bool:
+    def update_video_status(self, record_id: str, status: str, platform: str = None) -> bool:
         """
         更新视频状态（兼容接口，调用 update_publish_status）
 
         Args:
             record_id: 飞书记录ID
             status: 新状态（"已发布"或"发布失败"）
+            platform: 发布平台（可选，如 "bilibili", "tencent", "douyin"）
 
         Returns:
             是否更新成功
         """
+        # platform 参数当前仅用于兼容接口，不存储到飞书
         return self.update_publish_status(record_id, status)
 
     def create_record(self, fields: dict) -> Optional[str]:
@@ -783,13 +785,13 @@ class FeishuDataSource(VideoDataSource):
                 folder_name_clean = remove_date_prefix(item.name)
                 
                 if len(video_files) == 1:
-                    # 只有一个视频，直接使用
-                    video_items.append((video_files[0], item.name))
+                    # 只有一个视频，直接使用清理后的名称
+                    video_items.append((video_files[0], folder_name_clean))
                 else:
                     # 多个视频：选择与文件夹名最匹配的那个
-                    best_match, _ = select_best_matching_video(video_files, item.name, verbose=False)
+                    best_match, _ = select_best_matching_video(video_files, folder_name_clean, verbose=False)
                     if best_match:
-                        video_items.append((best_match, item.name))
+                        video_items.append((best_match, folder_name_clean))
         
         # 方式2: 扫描直接放在 videos 目录下的视频文件
         for video_file in self.videos_dir.glob("*.mp4"):

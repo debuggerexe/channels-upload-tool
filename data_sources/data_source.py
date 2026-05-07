@@ -31,6 +31,7 @@ class VideoInfo:
     location: str = "平台默认"     # 位置设置："不显示位置" | "平台默认"
     name_for_match: str = ""      # 用于匹配本地视频的Name字段（如 我的视频名称）
     folder_name: str = ""         # 文件夹名称（用于日志显示）
+    video_type: str = "自制"      # 视频类型："自制" | "转载"（B站专用）
     
     # 云端模式新增字段
     source_mode: str = "local"     # 数据来源模式："local" | "notion"
@@ -41,7 +42,7 @@ class VideoInfo:
     temp_local_cover_path: Optional[str] = None  # 从云端下载后的本地封面临时路径
     temp_local_horizontal_cover_path: Optional[str] = None  # 横封面临时路径
     notion_page_id: Optional[str] = None  # Notion页面ID，用于更新状态
-    publish_mode: Optional[str] = None  # 发布方式（"1"=定时发布, "2"=保存草稿）
+    publish_mode: Optional[str] = None  # 发布方式（"1"=定时发布, "2"=保存草稿, "3"=立即发布）
 
 
 class VideoDataSource(ABC):

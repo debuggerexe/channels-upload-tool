@@ -108,6 +108,7 @@ def calculate_publish_mode(
     
     优先级逻辑：
     - 发布方式 = 保存草稿 → 保存草稿 ("2")
+    - 发布方式 = 立即发布 → 立即发布 ("3")
     - 发布方式 = 定时发布 + 有发布日期 → 定时发布 ("1")
     - 发布方式 = 定时发布 + 无发布日期 → 降级为保存草稿 ("2")
     - 发布方式 = 空 + 有发布日期 → 默认定时发布 ("1")
@@ -118,7 +119,7 @@ def calculate_publish_mode(
         has_publish_date: 是否有发布日期
         
     Returns:
-        "1" (定时发布) 或 "2" (保存草稿)
+        "1" (定时发布), "2" (保存草稿), "3" (立即发布)
     """
     if not publish_mode_field:
         # 未设置发布方式
@@ -126,6 +127,8 @@ def calculate_publish_mode(
     
     if '保存草稿' in str(publish_mode_field):
         return '2'
+    elif '立即发布' in str(publish_mode_field):
+        return '3'
     elif '定时发布' in str(publish_mode_field):
         return '1' if has_publish_date else '2'
     else:

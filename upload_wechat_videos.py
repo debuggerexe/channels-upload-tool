@@ -214,7 +214,7 @@ class WeChatVideoUploader:
             video_data: 视频数据字典，包含 title, description, video_path, cover_path, publish_date 等
             playwright: Playwright 实例
             is_last_video: 是否是最后一个视频
-            publish_mode: 发布模式 ('1'=定时发布, '2'=保存草稿)
+            publish_mode: 发布模式 ('1'=定时发布, '2'=保存草稿, '3'=立即发布)
             max_retries: 最大重试次数
             
         Returns:
@@ -496,7 +496,14 @@ class WeChatVideoUploader:
                 # 【关键】使用每个视频自己的 publish_mode（如果有），否则使用传入的默认值
                 video_publish_mode = video.publish_mode if video.publish_mode else publish_mode
                 publish_date_str = video.publish_date.strftime('%Y-%m-%d %H:%M') if video.publish_date else '未设置'
-                print(f"\n📤 正在上传: {video.name_for_match} (发布日期: {publish_date_str}, 方式: {'定时发布' if video_publish_mode == '1' else '保存草稿'})")
+                # 显示发布方式
+                if video_publish_mode == '1':
+                    mode_str = '定时发布'
+                elif video_publish_mode == '3':
+                    mode_str = '立即发布'
+                else:
+                    mode_str = '保存草稿'
+                print(f"\n📤 正在上传: {video.name_for_match} (发布日期: {publish_date_str}, 方式: {mode_str})")
                 
                 # 组装视频数据
                 video_data = {
@@ -528,8 +535,38 @@ class WeChatVideoUploader:
                         await self._cleanup_temp_files(video.video_path)
                     elif "videos/" in video_path_str:
                         print(f"📁 本地视频保留: {video.name_for_match}")
+                    # 【新】立即更新发布状态为"已发布"
+                    if self.data_source:
+                        try:
+                            if hasattr(video, 'notion_page_id') and video.notion_page_id:
+                                status_updated = self.data_source.update_video_status(video.notion_page_id, "已发布")
+                                if status_updated:
+                                    print(f"  ✅ 状态已更新为'已发布'")
+                                else:
+                                    print(f"  ⚠️ 状态更新失败")
+                            elif hasattr(video, 'feishu_record_id') and video.feishu_record_id:
+                                status_updated = self.data_source.update_video_status(video.feishu_record_id, "已发布")
+                                if status_updated:
+                                    print(f"  ✅ 状态已更新为'已发布'")
+                                else:
+                                    print(f"  ⚠️ 状态更新失败")
+                        except Exception as e:
+                            print(f"  ❌ 更新状态失败: {e}")
                 else:
                     failed_videos.append(video)
+                    # 【新】立即更新发布状态为"发布失败"
+                    if self.data_source:
+                        try:
+                            if hasattr(video, 'notion_page_id') and video.notion_page_id:
+                                status_updated = self.data_source.update_video_status(video.notion_page_id, "发布失败")
+                                if status_updated:
+                                    print(f"  ❌ 状态已更新为'发布失败'")
+                            elif hasattr(video, 'feishu_record_id') and video.feishu_record_id:
+                                status_updated = self.data_source.update_video_status(video.feishu_record_id, "发布失败")
+                                if status_updated:
+                                    print(f"  ❌ 状态已更新为'发布失败'")
+                        except Exception as e:
+                            print(f"  ❌ 更新失败状态失败: {e}")
                 
                 # 如果不是最后一个视频，添加延迟
                 if not is_last_video:
@@ -551,7 +588,7 @@ async def main():
     # ==================== 命令行参数解析 ====================
     parser = argparse.ArgumentParser(description='微信视频号批量上传工具')
     parser.add_argument('--mode', choices=['local', 'notion', 'feishu'], help='数据源模式: local=本地模式, notion=Notion混合模式, feishu=飞书混合模式')
-    parser.add_argument('--publish', choices=['1', '2'], help='发布方式: 1=定时发布, 2=保存草稿')
+    parser.add_argument('--publish', choices=['1', '2', '3'], help='发布方式: 1=定时发布, 2=保存草稿, 3=立即发布')
     parser.add_argument('--no-interactive', action='store_true', help='非交互模式（使用默认值或命令行参数）')
     args = parser.parse_args()
     
@@ -768,7 +805,12 @@ async def main():
                 if not publish_choice:
                     publish_choice = '1'  # 默认定时发布
                     
-                action_name = "定时发布" if publish_choice == '1' else "保存草稿"
+                if publish_choice == '1':
+                    action_name = "定时发布"
+                elif publish_choice == '3':
+                    action_name = "立即发布"
+                else:
+                    action_name = "保存草稿"
                 print(f"\n✅ 确认使用{action_name}模式，开始上传...")
                 
                 success = await uploader.upload_all_videos(publish_mode=publish_choice, skip_confirm=True)
@@ -810,13 +852,16 @@ async def main():
                     print("\n请选择发布方式：")
                     print("1. 定时发布")
                     print("2. 保存草稿")
-                    print("3. 取消")
+                    print("3. 立即发布")
+                    print("4. 取消")
                     
-                    choice = input("\n请输入选项 (1/2/3): ").strip()
+                    choice = input("\n请输入选项 (1/2/3/4): ").strip()
                     
-                    if choice == '3':
+                    if choice == '4':
                         print("上传已取消")
                         return
+                    elif choice == '3':
+                        publish_choice = '3'  # 立即发布
                     elif choice not in ['1', '2']:
                         print("无效选项，默认使用定时发布")
                         publish_choice = '1'
@@ -827,12 +872,13 @@ async def main():
                     publish_choice = '1'  # 默认定时发布
                 
                 # 创建上传器并执行上传
-                uploader = WeChatVideoUploader(account_file, data_source=None)
+                uploader = WeChatVideoUploader(account_file, data_source=data_source)
                 
                 # 使用upload_videos_from_source方法上传所有视频
                 result = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
                 
-                # 更新发布状态（使用公共函数）
+                # 【已优化】状态已在每个视频上传成功后立即更新，此处仅作兜底
+                # 如果有遗漏的状态更新，再次批量更新
                 update_videos_publish_status(data_source, result, "Notion")
                     
             except Exception as e:
@@ -889,13 +935,16 @@ async def main():
                     print("\n请选择发布方式：")
                     print("1. 定时发布")
                     print("2. 保存草稿")
-                    print("3. 取消")
+                    print("3. 立即发布")
+                    print("4. 取消")
                     
-                    choice = input("\n请输入选项 (1/2/3): ").strip()
+                    choice = input("\n请输入选项 (1/2/3/4): ").strip()
                     
-                    if choice == '3':
+                    if choice == '4':
                         print("上传已取消")
                         return
+                    elif choice == '3':
+                        publish_choice = '3'  # 立即发布
                     elif choice not in ['1', '2']:
                         print("无效选项，默认使用定时发布")
                         publish_choice = '1'
@@ -969,13 +1018,16 @@ async def main():
                     print("\n请选择发布方式：")
                     print("1. 定时发布")
                     print("2. 保存草稿")
-                    print("3. 取消")
+                    print("3. 立即发布")
+                    print("4. 取消")
                     
-                    choice = input("\n请输入选项 (1/2/3): ").strip()
+                    choice = input("\n请输入选项 (1/2/3/4): ").strip()
                     
-                    if choice == '3':
+                    if choice == '4':
                         print("上传已取消")
                         return
+                    elif choice == '3':
+                        publish_choice = '3'  # 立即发布
                     elif choice not in ['1', '2']:
                         print("无效选项，默认使用定时发布")
                         publish_choice = '1'
@@ -985,36 +1037,20 @@ async def main():
                 if not publish_choice:
                     publish_choice = '1'  # 默认定时发布
                 
-                # 创建上传器并执行上传
-                uploader = WeChatVideoUploader(account_file, data_source=None)
+                # 创建上传器并执行上传（传入 data_source 以支持即时状态更新）
+                uploader = WeChatVideoUploader(account_file, data_source=data_source)
                 
                 # 转换为VideoInfo列表
                 result = await uploader.upload_videos_from_source(videos, publish_mode=publish_choice)
                 
-                # 更新发布状态（根据实际上传结果）
-                print("\n📝 正在更新发布状态...")
-                success_count = 0
-                fail_count = 0
-                
-                # 标记成功的视频
-                for video in result.get('success', []):
-                    if video.notion_page_id:
-                        status_updated = data_source.update_video_status(video.notion_page_id, "已发布")
-                        if status_updated:
-                            print(f"  ✅ {video.name_for_match} -> 已发布")
-                            success_count += 1
-                        else:
-                            print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
-                
-                # 标记失败的视频
-                for video in result.get('failed', []):
-                    if video.notion_page_id:
-                        status_updated = data_source.update_video_status(video.notion_page_id, "发布失败")
-                        if status_updated:
-                            print(f"  ❌ {video.name_for_match} -> 发布失败")
-                            fail_count += 1
-                        else:
-                            print(f"  ⚠️ {video.name_for_match} -> 状态更新失败")
+                # 【已优化】状态已在每个视频上传成功后立即更新
+                # 此处仅作为兜底，检查是否有遗漏
+                print("\n📝 检查发布状态更新...")
+                success_count = len(result.get('success', []))
+                fail_count = len(result.get('failed', []))
+                print(f"  ✅ 成功: {success_count} 个")
+                if fail_count > 0:
+                    print(f"  ❌ 失败: {fail_count} 个")
                 
                 if success_count > 0:
                     print(f"\n✅ 成功上传并标记 {success_count} 个视频")

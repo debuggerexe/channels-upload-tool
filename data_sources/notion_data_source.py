@@ -52,9 +52,11 @@ class NotionDataSource(VideoDataSource):
     
     def __init__(self, config: Optional[dict] = None):
         super().__init__()  # 调用基类__init__设置temp_dir
-        self.api_token = os.getenv("NOTION_API_TOKEN")
+        self.config = config or {}
+        # 优先从 config.json 读取，如果没有再从环境变量读取
+        self.api_token = self.config.get("notion_api_token") or os.getenv("NOTION_API_TOKEN")
         if not self.api_token:
-            raise ValueError("请设置环境变量 NOTION_API_TOKEN")
+            raise ValueError("请设置环境变量 NOTION_API_TOKEN 或在 config.json 中配置 notion_api_token")
         
         self.headers = {
             "Authorization": f"Bearer {self.api_token}",
@@ -783,14 +785,15 @@ class NotionDataSource(VideoDataSource):
         
         return videos
     
-    def update_video_status(self, page_id: str, status: str = "已发布") -> bool:
+    def update_video_status(self, page_id: str, status: str = "已发布", platform: str = None) -> bool:
         """
         更新 Notion 中视频的状态
-        
+
         Args:
             page_id: Notion 页面 ID
             status: 新状态值（默认"已发布"）
-            
+            platform: 发布平台（可选，如 "bilibili", "tencent", "douyin"）
+
         Returns:
             是否更新成功
         """

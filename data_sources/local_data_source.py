@@ -5,7 +5,7 @@
 
 import os
 from datetime import datetime, date
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 
 from .data_source import VideoDataSource, VideoInfo

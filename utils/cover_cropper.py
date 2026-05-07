@@ -157,11 +157,11 @@ def prepare_douyin_covers(image_path: str, position: str = 'middle') -> tuple:
         (竖封面路径, 横封面路径, 临时文件列表) - 如果裁剪失败则返回原图路径
     """
     if not image_path or not os.path.exists(image_path):
-        return image_path, image_path
+        return image_path, image_path, []
     
     # middle时不裁剪，直接使用原图
     if position == 'middle':
-        return image_path, image_path
+        return image_path, image_path, []
     
     temp_files = []  # 跟踪生成的临时文件
     

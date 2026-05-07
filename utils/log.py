@@ -44,3 +44,5 @@ logger.remove()
 logger.add(stdout, colorize=True, format=log_formatter)
 
 tencent_logger = create_logger('tencent', 'logs/tencent.log')
+douyin_logger = create_logger('douyin', 'logs/douyin.log')
+bilibili_logger = create_logger('bilibili', 'logs/bilibili.log')

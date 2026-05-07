@@ -211,9 +211,39 @@ async def upload_videos_from_source(
         if upload_success:
             result['success'].append(video)
             success(f"✅ 视频上传成功: {video.name_for_match or video.title}")
+            # 立即更新发布状态为"已发布"
+            if data_source:
+                try:
+                    if hasattr(video, 'notion_page_id') and video.notion_page_id:
+                        status_updated = data_source.update_video_status(video.notion_page_id, "已发布")
+                        if status_updated:
+                            success(f"  ✅ 状态已更新为'已发布'")
+                        else:
+                            warning(f"  ⚠️ 状态更新失败")
+                    elif hasattr(video, 'feishu_record_id') and video.feishu_record_id:
+                        status_updated = data_source.update_video_status(video.feishu_record_id, "已发布")
+                        if status_updated:
+                            success(f"  ✅ 状态已更新为'已发布'")
+                        else:
+                            warning(f"  ⚠️ 状态更新失败")
+                except Exception as e:
+                    error(f"  ❌ 更新状态失败: {e}")
         else:
             result['failed'].append(video)
             error(f"❌ 视频上传失败: {video.name_for_match or video.title}")
+            # 立即更新发布状态为"发布失败"
+            if data_source:
+                try:
+                    if hasattr(video, 'notion_page_id') and video.notion_page_id:
+                        status_updated = data_source.update_video_status(video.notion_page_id, "发布失败")
+                        if status_updated:
+                            error(f"  ❌ 状态已更新为'发布失败'")
+                    elif hasattr(video, 'feishu_record_id') and video.feishu_record_id:
+                        status_updated = data_source.update_video_status(video.feishu_record_id, "发布失败")
+                        if status_updated:
+                            error(f"  ❌ 状态已更新为'发布失败'")
+                except Exception as e:
+                    error(f"  ❌ 更新失败状态失败: {e}")
         
         # 视频间间隔，避免触发风控
         if index < total:

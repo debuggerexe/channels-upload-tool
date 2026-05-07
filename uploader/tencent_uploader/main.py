@@ -77,7 +77,7 @@ class TencentVideo(object):
         self.cover_position = cover_position  # 封面选取位置：'top'/'middle'/'bottom'
         self.thumbnail_path = thumbnail_path  # 新增：外部传入的封面路径
         self.keep_open = keep_open  # 是否保持浏览器打开
-        self.publish_mode = publish_mode  # 发布模式：'1'=定时发布, '2'=保存草稿
+        self.publish_mode = publish_mode  # 发布模式：'1'=定时发布, '2'=保存草稿, '3'=立即发布
         self.collections = collections if collections else []  # 合集名称列表（可选）
         self.on_upload_success = on_upload_success  # 【新增】上传成功后的回调函数
         self.location = location  # 【新增】位置设置："不显示位置" | "平台默认"
@@ -477,6 +477,10 @@ class TencentVideo(object):
                 # 保存草稿模式：不设置定时，直接保存草稿
                 tencent_logger.info("  [-] 保存草稿模式，直接保存")
                 await self.click_save_draft(page)
+            elif self.publish_mode == '3':
+                # 立即发布模式：不设置定时，直接点击发表
+                tencent_logger.info("  [-] 立即发布模式，直接发表")
+                await self.click_publish(page)
             else:
                 # 定时发布模式（默认）
                 # 注意：定时日期已在 fill_form_during_upload 中设置，此处直接点击发表
@@ -556,7 +560,7 @@ class TencentVideo(object):
             await self.set_location(page)
             
             # 6. 【新增】设置定时发布日期（上传期间可提前设置）
-            if self.publish_mode != '2':  # 非保存草稿模式
+            if self.publish_mode == '1':  # 仅定时发布模式设置时间
                 tencent_logger.info("  [-] 正在设置定时发布...")
                 if not self.publish_date or self.publish_date == 0:
                     from datetime import datetime, timedelta

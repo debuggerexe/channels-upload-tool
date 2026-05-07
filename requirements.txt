@@ -13,3 +13,5 @@ uvicorn[standard]
 python-multipart
 pydantic
 lark-oapi>=1.0.0
+yt-dlp>=2023.7.6
+biliup==0.4.0

@@ -1,9 +1,10 @@
-# 微信视频号 + 抖音自动上传工具
+# 微信视频号 + 抖音 + Bilibili 自动上传工具
 
-自动化发布视频到**微信视频号**和**抖音**平台，支持多种数据源（Notion、飞书、本地文件）。
+自动化发布视频到**微信视频号**、**抖音**和 **Bilibili** 平台，支持多种数据源（Notion、飞书、本地文件）。
 
 - 视频号入口: `upload_wechat_videos.py`
 - 抖音入口: `upload_douyin_videos.py`
+- Bilibili 入口: `upload_bilibili_videos.py`
 
 ## 功能特性
 
@@ -15,6 +16,7 @@
 - **多平台支持**
   - 微信视频号：支持短标题（6-16字）、原创声明、合集添加
   - 抖音：支持 9:16 竖屏封面、话题标签、同步头条/西瓜视频、定时发布、合集添加
+  - **Bilibili**：支持分区选择、定时发布、标签、转载/自制声明
 
 - **智能处理**
   - 智能文件名匹配（自动去除日期前缀）
@@ -54,8 +56,10 @@
 ├── 📁 uploader/                   # 上传器层
 │   ├── 📁 tencent_uploader/       # 微信视频号上传器
 │   │   └── 📄 main.py             # Playwright 自动化上传核心
-│   └── 📁 douyin_uploader/        # 抖音上传器
-│       └── 📄 main.py             # Playwright 自动化上传核心
+│   ├── 📁 douyin_uploader/        # 抖音上传器
+│   │   └── 📄 main.py             # Playwright 自动化上传核心
+│   └── 📁 bilibili_uploader/       # Bilibili 上传器
+│       └── 📄 main.py             # biliup 库 API 上传核心
 │
 ├── 📁 utils/                      # 工具层
 │   ├── 📄 output_utils.py         # 终端输出模板（5阶段统一输出）
@@ -91,6 +95,15 @@ source .venv/bin/activate && python upload_wechat_videos.py --mode notion --no-i
 source .venv/bin/activate && python upload_douyin_videos.py --mode notion --no-interactive
 ```
 
+### Bilibili
+```bash
+# 上传视频
+source .venv/bin/activate && python upload_bilibili_videos.py --mode notion --no-interactive
+
+# 转载视频
+python upload_bilibili_videos.py --mode notion --copyright 2
+```
+
 ### 手动打开浏览器
 ```bash
 # 交互式选择（不带参数）
@@ -102,6 +115,9 @@ python open_browser.py --douyin   # 抖音
 
 # 查看帮助
 python open_browser.py -h
+
+# Bilibili 获取 Cookie
+python examples/get_bilibili_cookie.py
 ```
 
 ### 上传流程
@@ -153,7 +169,7 @@ cp config.example.json config.json
 | **封面裁剪** | **Select** | **top/middle/bottom** | 可选（默认middle） |
 | **位置** | **Select** | **不显示位置/平台默认** | 可选（默认平台默认） |
 | **发布状态** | **Select** | **待发布/已发布/发布失败** | 混合模式必填 |
-| **发布方式** | **Select** | **定时发布/保存草稿** | 可选 |
+| **发布方式** | `Select` | **定时发布/保存草稿/立即发布** | 可选 |
 
 **字段说明：**
 - **发布状态**（混合模式）：控制视频上传流程
@@ -165,8 +181,10 @@ cp config.example.json config.json
 - **发布方式**（混合模式）：控制视频的发布方式
   - `定时发布`：按 `发布日期` 字段的时间定时发布
   - `保存草稿`：保存到草稿箱，不立即发布
+  - `立即发布`：直接发布视频，不设置发布时间
   - 优先级逻辑：
     - 发布方式 = 保存草稿 → 保存草稿
+    - 发布方式 = 立即发布 → 立即发布
     - 发布方式 = 定时发布 + 有发布日期 → 定时发布
     - 发布方式 = 定时发布 + 无发布日期 → 降级为保存草稿
     - 发布方式 = 空 + 有发布日期 → 默认定时发布
@@ -363,12 +381,67 @@ source .venv/bin/activate && python upload_wechat_videos.py --mode feishu --no-i
 | **封面裁剪** | 单选 | **top/middle/bottom** | 可选（默认middle） |
 | **位置** | 单选 | **不显示位置/平台默认** | 可选（默认平台默认） |
 | **发布状态** | 单选 | **待发布/已发布/发布失败** | 混合模式必填 |
-| **发布方式** | 单选 | **定时发布/保存草稿** | 可选 |
+| **发布方式** | 单选 | **定时发布/保存草稿/立即发布** | 可选 |
 
 **与 Notion 的区别：**
 - 飞书多维表格在国内访问更快更稳定
 - 文件存储在飞书云文档中
 - 相同的字段逻辑和发布流程
+
+---
+
+## Bilibili 使用说明
+
+Bilibili 上传使用 **biliup** 库实现，不同于视频号/抖音的浏览器自动化方式。
+
+### 特点
+
+- **技术方案**：Playwright 浏览器自动化（与视频号/抖音一致）
+- **Cookie 格式**：Playwright storage state 格式
+- **状态**：✅ 已测试可用
+
+### Cookie 获取
+
+```bash
+# 运行 Cookie 获取脚本
+python examples/get_bilibili_cookie.py
+```
+
+脚本会：
+1. 打开浏览器访问 Bilibili
+2. 手动登录你的账号
+3. 按回车保存 Cookie 到 `cookies/bilibili/account.json`
+
+### 命令行参数
+
+```bash
+python upload_bilibili_videos.py --mode notion --copyright 1 --no-interactive
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--mode` | 数据源模式：local/notion/feishu |
+| `--copyright` | 1=自制(默认), 2=转载 |
+| `--publish-type` | 1=定时发布(默认), 2=立即发布 |
+| `--no-interactive` | 非交互模式，自动确认上传 |
+
+### Bilibili 字段映射
+
+Bilibili 使用与其他平台相同的 `VideoInfo` 数据结构：
+
+| VideoInfo 字段 | Bilibili 对应字段 | 说明 |
+|---------------|------------------|------|
+| `title` | `title` | 视频标题（自动添加随机emoji避免重复） |
+| `description` | `desc` | 视频描述 |
+| `tags` | `tags` | 标签列表（逗号分隔自动转换） |
+| `publish_date` | `dtime` | 定时发布时间戳 |
+| `video_path` | `file` | 上传视频文件路径 |
+| `original_declaration` | `copyright` | 1=自制, 2=转载 |
+
+**注意**：
+- B站不允许相同标题的视频，上传时自动添加随机 emoji 区分
+- 封面由 biliup 自动从视频提取，无需额外配置
+- 合集、位置等字段在 B站暂不支持
 
 ---
 
@@ -430,13 +503,27 @@ python open_browser.py
 
 ## Cookie 获取
 
-首次使用需获取登录凭证：
+### 微信视频号
 
 ```bash
 python examples/get_tencent_cookie.py
 ```
 
 扫码登录后会自动保存到 `cookies/tencent_uploader/account.json`
+
+### 抖音
+
+```bash
+python examples/get_douyin_cookie.py
+```
+
+### Bilibili
+
+```bash
+python examples/get_bilibili_cookie.py
+```
+
+手动登录后按回车保存 Cookie 到 `cookies/bilibili/account.json`
 
 ---
 
@@ -509,6 +596,149 @@ playwright install
 ---
 
 ## 更新日志
+
+### 2026-05-07
+- **[新增] 视频号支持"立即发布"模式**
+  - **功能**：新增第三种发布方式 `立即发布`，视频直接发布，不设置定时
+  - **优先级逻辑**：
+    - `保存草稿` → 保存到草稿箱
+    - `立即发布` → 直接点击发表（忽略发布时间）
+    - `定时发布` + 有日期 → 按指定时间定时发布
+    - `定时发布` + 无日期 → 降级为保存草稿
+  - **实现**：
+    - `upload_wechat_videos.py`：支持 `--publish 3` 命令行参数，交互菜单增加"立即发布"选项
+    - `utils/text_utils.py`：`calculate_publish_mode()` 函数支持返回 `'3'`
+    - `uploader/tencent_uploader/main.py`：`publish_mode == '3'` 时直接点击发表，跳过时间设置
+    - 上传成功后立即更新 Notion/飞书状态为"已发布"
+  - **使用方式**：
+    - Notion/飞书「发布方式」字段填写 `立即发布`
+    - 命令行：`python upload_wechat_videos.py --mode notion --publish 3`
+
+### 2026-04-19
+- **[修复] B站发布按钮点击失败问题** - 简化发布按钮选择器和点击逻辑
+  - **问题**：`.submit-container .submit-add` 选择器可能已过时，导致发布按钮无法点击
+  - **解决方案**：
+    1. 使用多种选择器尝试找到提交按钮：`button:has-text("立即投稿")`, `button:has-text("投稿")`, `.submit-add` 等
+    2. 简化点击逻辑：优先使用 JavaScript 直接点击，失败时回退到 Playwright 原生点击
+    3. 移除冗余的父容器点击、回车提交等复杂逻辑
+  - **影响文件**：`uploader/bilibili_uploader/main.py`
+
+- **[新增] B站上传器支持 `on_upload_success` 回调** - 与视频号/抖音保持一致
+  - **功能**：上传成功后自动调用回调函数更新数据源状态
+  - **实现**：`BilibiliVideo` 类新增 `on_upload_success` 参数
+  - **影响文件**：`uploader/bilibili_uploader/main.py`, `upload_bilibili_videos.py`
+  - **状态更新**：上传成功后立即更新 Notion/飞书状态为「已发布」，无需等待批量上传完成
+
+### 2026-04-16
+- [修复] **修复发布状态不更新问题** - 抖音、微信视频号上传后状态未更新
+  - 问题：批量上传完成后才统一更新状态，用户中断或程序异常时状态不更新
+  - 解决：改为每上传完一个视频立即更新发布状态
+  - 影响文件：`upload_douyin_videos.py`, `upload_wechat_videos.py`
+  - Bilibili 原本就是即时更新，无需修改
+
+### 2026-04-15
+- [清理] **移除所有调试测试代码** - 清理Bilibili上传器中的调试代码
+  - 删除调试脚本 `debug_bilibili_submit.py`
+  - 移除console error监听、页面结构调试、按钮状态调试
+  - 删除Vue分析、表单提交测试、手动调试模式等调试功能
+  - 清理截图保存代码，保留核心上传逻辑
+  - 简化提交流程：父容器点击 → 回车提交 → Playwright点击
+
+### 2026-04-14
+- [重大变更] **移除 TID 分区参数** - B站上传不再需要指定分区
+  - 分区由平台自动分配默认值，不影响发布
+  - 简化命令行参数，移除 `--tid`、`--zones`、`--list-zones`
+- [优化] B站上传器分区设置逻辑简化，直接使用平台默认分区
+- [优化] B站上传器提交验证简化，移除不可靠的网络请求监听
+- [修复] 修复 `upload_bilibili_videos.py` 中的缩进错误
+- [优化] 优化上传成功后的状态更新逻辑
+- [修复] 修复 Notion API Token 读取问题（支持从 config.json 读取）
+
+### 2026-04-13
+- [修复] **修复 Bilibili 类型设置失败问题** - 完全重写类型设置逻辑，使用2种新策略：
+  1. Vue组件直接操作
+  2. 智能级联选择器检测
+  并增加类型设置验证机制
+
+### 2026-04-12 (深度优化 Bilibili 上传功能)
+- **修复内容**：
+  1. **修复文件上传定位** @ `uploader/bilibili_uploader/main.py`
+     - 增加文件输入框等待时间（30秒）
+     - 使用 `set_input_files` 60秒超时
+  2. **修复标题填写**
+     - 精确匹配 `input.input-val[placeholder="请输入稿件标题"]`
+     - 备选通过 `.video-title input.input-val` 定位
+  3. **添加类型字段支持**
+     - 新增 `video_type` 字段（自制/转载）@ `data_sources/data_source.py`
+     - 根据 copyright 参数点击对应 radio 按钮
+     - DOM选择器：`.type-check .check-radio-v2-name:has-text("自制/转载")`
+  4. **修复标签填写**
+     - 精确查找 `#tag-container input[placeholder*="回车"]`
+     - 逐个添加标签，每次回车确认，最多10个
+     - 每个标签间隔0.5秒等待动画
+  5. **修复描述填写**
+     - 使用 `contenteditable` 编辑器 `.desc-container .ql-editor`
+     - 先清空再填写，确保内容正确
+  6. **修复定时发布**
+     - 点击 `.switch-roll` 开关开启定时发布
+     - 日期选择：点击 `.date-picker-date .date-show` -> 选择日历中日期
+     - 时间选择：点击 `.date-picker-timer .date-show` -> 填写时间
+     - 日期格式：`2026-04-26`，时间格式：`10:00`
+  7. **修复提交按钮点击** (2026-04-14 重大修复)
+     - 主选择器：`.submit-container .submit-add` (立即投稿)
+     - 问题诊断：按钮是 SPAN 元素，`hasVue: False`，`hasClickHandler: False`
+     - 表单验证失败：`提交稿件检测失败 undefined`（可能是分区未设置导致）
+     - 已尝试方案：
+       * Playwright 强制点击 `force=True`
+       * 坐标点击 `page.mouse.click(x, y)`
+       * JavaScript 模拟完整事件序列（mousedown/mouseup/click）
+       * Vue 组件事件触发 `$emit('click')`
+       * 向上查找父组件调用 `submit()` 方法
+       * 移除遮挡层 `pointerEvents = 'none'`
+       * 键盘回车键提交
+       * 添加随机延迟模拟人类行为
+     - 当前状态：点击后按钮仍然存在，需要进一步调试
+     - 下一步：分析 B站前端代码，找到真正的提交函数名
+  8. **修复数据源状态更新**
+     - FeishuDataSource.update_video_status() 添加 `platform` 参数支持
+- **数据源字段映射**：
+  | 字段 | B站页面 | 说明 |
+  |------|---------|------|
+  | `title` | 标题 | input.input-val placeholder="请输入稿件标题" |
+  | `video_type` | 类型 | 自制/转载 radio选择 |
+  | `tags` | 标签 | #tag-container 逐个添加 |
+  | `description` | 简介 | .ql-editor contenteditable |
+  | `publish_date` | 定时发布 | .switch-roll + 日期时间输入框 |
+- **测试状态**：🔄 等待测试
+
+### 2026-04-12 (新增 Bilibili 批量上传功能)
+- **功能**：新增 Bilibili（B站）视频批量上传功能
+- **技术方案**：Playwright 浏览器自动化（与视频号/抖音一致）
+- **实现内容**：
+  1. **新增 `BilibiliVideoUploader` 类** @ `uploader/bilibili_uploader/main.py`
+     - 基于 Playwright 浏览器自动化实现视频上传
+     - 支持 Cookie 自动验证和登录
+     - 支持转载/自制声明（copyright）
+  2. **新增入口脚本** `upload_bilibili_videos.py`
+     - 支持 local/notion/feishu 三种数据源模式
+     - 命令行参数：`--copyright`（1=自制,2=转载）
+     - 自动添加随机 emoji 避免 B站重复标题限制
+  3. **新增 Cookie 获取脚本** `examples/get_bilibili_cookie.py`
+     - 浏览器登录后保存 Cookie 到 `cookies/bilibili/account.json`
+  4. **新增分区常量** @ `utils/constant.py`
+     - `BilibiliZoneTypes` 枚举类，包含全部分区ID
+     - `BILIBILI_ACCOUNT_FILE` 路径常量
+  5. **新增日志器** @ `utils/log.py`
+     - 添加 `bilibili_logger`
+- **字段映射**：
+  | VideoInfo | Bilibili | 说明 |
+  |-----------|----------|------|
+  | title | title | 自动添加随机emoji |
+  | description | desc | 视频描述 |
+  | tags | tags | 逗号分隔转列表 |
+  | publish_date | 定时发布 | 可选 |
+  | original_declaration | copyright | 1=自制, 2=转载 |
+- **兼容性**：完全独立于视频号/抖音功能，零耦合，数据源层完全复用
 
 ### 2026-04-11 (抖音合集功能 - 最终方案)
 - **功能**：新增抖音合集选择功能
@@ -1082,12 +1312,6 @@ playwright install
 ---
 
 ## 更新日志
-
-### 2026-04-11 (清理 - 移除临时文件夹)
-- **清理 Git 历史** - 使用 `git filter-branch` 彻底移除 `social-auto-upload-tool` 临时文件夹
-  - 该文件夹为外部参考项目，非本项目组成部分
-  - 已从完整 Git 历史中清除，强制推送到 GitHub
-  - 仓库现在干净，无冗余文件
 
 ### 2026-04-10 (重大功能 - 抖音平台支持)
 - **新增抖音批量自动上传功能** - 完整支持抖音创作者中心视频上传
